@@ -146,11 +146,10 @@ class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
         @Suppress("UNCHECKED_CAST")
         val entryCmp = entryComparator ?: run {
-            // Fall back to KeyType comparison with 3-tier logic  
             val keyCmp = comparator ?: Comparator { k1, k2 ->
                 (k1 as Comparable<KeyType>).compareTo(k2)
             }
-            Comparator<Map.Entry<KeyType, ValueType>> { e1, e2 -> keyCmp.compare(e1.key, e2.key) }
+            Comparator { e1, e2 -> keyCmp.compare(e1.key, e2.key) }
         }
 
         fun sorted(): List<Map.Entry<KeyType, ValueType>> =
@@ -233,6 +232,45 @@ class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         entryComparator: Comparator<Map.Entry<KeyType, ValueType>>? = null,
         filter: ((Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
     ): SnapshotStateList<out Map.Entry<KeyType, ValueType>> {
+        return asSnapshotStateListBySecondaryKeyInternal(
+            scope = scope,
+            secondaryKeyName = secondaryKeyName,
+            secondaryKeyValue = secondaryKeyValue,
+            entryComparator = entryComparator,
+            filter = filter,
+            isComparable = true,
+            secondaryKeyComparator = null
+        )
+    }
+
+    fun <SecondaryKeyType> asSnapshotStateListBySecondaryKey(
+        scope: CoroutineScope,
+        secondaryKeyName: String,
+        secondaryKeyComparator: Comparator<SecondaryKeyType>,
+        secondaryKeyValue: SecondaryKeyType? = null,
+        entryComparator: Comparator<Map.Entry<KeyType, ValueType>>? = null,
+        filter: ((Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+    ): SnapshotStateList<out Map.Entry<KeyType, ValueType>> {
+        return asSnapshotStateListBySecondaryKeyInternal(
+            scope = scope,
+            secondaryKeyName = secondaryKeyName,
+            secondaryKeyValue = secondaryKeyValue,
+            entryComparator = entryComparator,
+            filter = filter,
+            isComparable = false,
+            secondaryKeyComparator = secondaryKeyComparator
+        )
+    }
+
+    private fun <SecondaryKeyType> asSnapshotStateListBySecondaryKeyInternal(
+        scope: CoroutineScope,
+        secondaryKeyName: String,
+        secondaryKeyValue: SecondaryKeyType? = null,
+        entryComparator: Comparator<Map.Entry<KeyType, ValueType>>? = null,
+        filter: ((Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        isComparable: Boolean,
+        secondaryKeyComparator: Comparator<SecondaryKeyType>? = null
+    ): SnapshotStateList<out Map.Entry<KeyType, ValueType>> {
 
         data class Entry<K, V>(override val key: K, override val value: V) : Map.Entry<K, V>
 
@@ -245,9 +283,30 @@ class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
         // Default comparator: sort by secondary key first, then by primary key
         val entryCmp = entryComparator ?: run {
-            val primaryKeyCmp = comparator ?: Comparator { k1, k2 ->
-                @Suppress("UNCHECKED_CAST")
-                (k1 as Comparable<KeyType>).compareTo(k2)
+
+            val secondaryKeyCmp: Comparator<SecondaryKeyType?> = if (isComparable) {
+                // Use natural comparison for Comparable secondary keys
+                Comparator { sk1, sk2 ->
+                    when {
+                        sk1 == null && sk2 == null -> 0
+                        sk1 == null -> 1  // nulls last
+                        sk2 == null -> -1
+                        else -> {
+                            @Suppress("UNCHECKED_CAST")
+                            (sk1 as Comparable<SecondaryKeyType>).compareTo(sk2)
+                        }
+                    }
+                }
+            } else {
+                // Use provided comparator for non-Comparable secondary keys
+                Comparator { sk1, sk2 ->
+                    when {
+                        sk1 == null && sk2 == null -> 0
+                        sk1 == null -> 1  // nulls last
+                        sk2 == null -> -1
+                        else -> secondaryKeyComparator!!.compare(sk1, sk2)
+                    }
+                }
             }
 
             Comparator<Map.Entry<KeyType, ValueType>> { e1, e2 ->
@@ -255,18 +314,16 @@ class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                 val sk1 = keyExtractor(e1.value)
                 val sk2 = keyExtractor(e2.value)
 
-                val secondaryComparison = when {
-                    sk1 == null && sk2 == null -> 0
-                    sk1 == null -> 1  // nulls last
-                    sk2 == null -> -1
-                    else -> sk1.compareTo(sk2)  // We know they're comparable due to type constraint
-                }
+                val secondaryComparison = secondaryKeyCmp.compare(sk1, sk2)
 
                 // If secondary keys are equal, fall back to primary key comparison
                 if (secondaryComparison != 0) {
                     secondaryComparison
                 } else {
-                    primaryKeyCmp.compare(e1.key, e2.key)
+                    (comparator ?: Comparator { k1, k2 ->
+                        @Suppress("UNCHECKED_CAST")
+                        (k1 as Comparable<KeyType>).compareTo(k2)
+                    }).compare(e1.key, e2.key)
                 }
             }
         }
@@ -381,9 +438,9 @@ class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
 }
 
-data class PersistedEsInfo<KeyType : Any, ValueType : Any>(
+data class PersistedEsInfo<KeyType: Any, ValueType: Any>(
     val keyTypeSerializer: KSerializer<KeyType>,
-    val valueTypeSerializer: KSerializer<ValueType?>,
+    val valueTypeSerializer: KSerializer<ValueType>,
     val rootDir: Path?,
     val fileSystem: FileSystem
 )

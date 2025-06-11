@@ -59,6 +59,9 @@ kotlin {
                 // JSON serialization library, works with the Kotlin serialization plugin.
                 api(libs.kotlinx.serialization.json)
 
+                implementation(libs.atomicfu)
+
+
                 api(libs.kotlinx.io.core)
 
                 api(compose.runtime)
@@ -71,13 +74,14 @@ kotlin {
         commonTest {
             dependencies {
                 implementation(libs.kotlin.test)
+                implementation(libs.kotlinx.coroutines.test)
             }
         }
     }
 }
 
 android {
-    namespace = "org.jetbrains.kotlinx.multiplatform.library.template"
+    namespace = "jst.oktopoi"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
     defaultConfig {
         minSdk = libs.versions.android.minSdk.get().toInt()

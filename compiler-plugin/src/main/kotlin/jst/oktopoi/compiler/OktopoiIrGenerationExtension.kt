@@ -82,13 +82,11 @@ class OktopoiTransformer(
                     it.name.asString() == "callingClassName"
                 } ?: error("Property callingClassName not found in ${resultClass.name}")
                 val callingClassNameField = callingClassNameProperty.backingField ?: error("Backing field not found for property ${callingClassNameProperty.name}")
-//                callingClassNameField.visibility = DescriptorVisibilities.PUBLIC
 
                 val propertyNameProperty: IrProperty = resultClass.properties.firstOrNull {
                     it.name.asString() == "propertyName"
                 } ?: error("Property propertyName not found in ${resultClass.name}")
                 val propertyNameField = propertyNameProperty.backingField ?: error("Backing field not found for property ${propertyNameProperty.name}")
-//                propertyNameField.visibility = DescriptorVisibilities.PUBLIC
 
                 // Generate: tempVar.callingClassName = "ClassName"
                 +irSetField(
