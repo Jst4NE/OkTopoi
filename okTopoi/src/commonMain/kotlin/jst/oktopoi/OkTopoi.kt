@@ -9,7 +9,6 @@ import kotlinx.io.files.FileSystem
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
 import kotlinx.serialization.InternalSerializationApi
-import kotlinx.serialization.builtins.nullable
 import kotlinx.serialization.serializer
 
 internal val persistCoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -84,7 +83,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
     return Es<KeyType, ValueType>(
         persisted = PersistedEsInfo(
             serializer<KeyType>(),
-            serializer<ValueType>().nullable,
+            serializer<ValueType>(),
             rootDir,
             fileSystem
         ),
@@ -105,7 +104,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> eps(
     return Es<KeyType, ValueType>(
         persisted = PersistedEsInfo(
             serializer<KeyType>(),
-            serializer<ValueType>().nullable,
+            serializer<ValueType>(),
             rootDir,
             fileSystem
         ),

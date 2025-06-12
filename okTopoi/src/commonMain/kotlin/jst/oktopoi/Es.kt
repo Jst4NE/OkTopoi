@@ -70,9 +70,6 @@ class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                                     persisted.valueTypeSerializer,
                                     source.readString()
                                 )
-                                if (value == null) {
-                                    return@use
-                                }
                                 this@Es.put(
                                     keySelector?.invoke(value) ?: Json.decodeFromString(
                                         persisted.keyTypeSerializer,
@@ -112,21 +109,24 @@ class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                         is Cleared -> fileSystem.list(dirPath).forEach { fileSystem.delete(it) }
                         is Rebuild -> {
                             fileSystem.list(dirPath).forEach { fileSystem.delete(it) }
-                            entries.forEach { entry ->
-                                fileSystem.sink(
-                                    Path(
-                                        dirPath,
-                                        Json.encodeToString(persisted.keyTypeSerializer, entry.key)
-                                    )
-                                )
-                                    .buffered().use {
-                                        it.writeString(
-                                            Json.encodeToString(
-                                                persisted.valueTypeSerializer,
-                                                entry.value
-                                            )
+                            // Optimized: Use single lock with unsafe entry traversal
+                            rwLock.withReadLock {
+                                forEachEntryUnsafe { key, value ->
+                                    fileSystem.sink(
+                                        Path(
+                                            dirPath,
+                                            Json.encodeToString(persisted.keyTypeSerializer, key)
                                         )
-                                    }
+                                    )
+                                        .buffered().use {
+                                            it.writeString(
+                                                Json.encodeToString(
+                                                    persisted.valueTypeSerializer,
+                                                    value
+                                                )
+                                            )
+                                        }
+                                }
                             }
                         }
                     }
@@ -135,6 +135,114 @@ class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             }
         }
     }
+
+    /**
+     * Suspend version of asSnapshotStateList() for optimal performance in coroutine contexts.
+     * Creates reactive state list under read lock for thread safety.
+     */
+    suspend fun asSnapshotStateListSuspend(
+        scope: CoroutineScope,
+        entryComparator: Comparator<Map.Entry<KeyType, ValueType>>? = null,
+        filter: ((Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+    ): SnapshotStateList<Map.Entry<KeyType, ValueType>> = rwLock.withReadLock {
+        data class Entry<K, V>(override val key: K, override val value: V) : Map.Entry<K, V>
+
+        @Suppress("UNCHECKED_CAST")
+        val entryCmp = entryComparator ?: run {
+            val keyCmp = comparator ?: Comparator { k1, k2 ->
+                (k1 as Comparable<KeyType>).compareTo(k2)
+            }
+            Comparator { e1, e2 -> keyCmp.compare(e1.key, e2.key) }
+        }
+
+
+        suspend fun sortedSuspend(): List<Map.Entry<KeyType, ValueType>> = rwLock.withReadLock {
+            // Optimized: Use unsafe node filtering with single lock  
+            val filteredNodes = if (filter != null) {
+                filterNodesUnsafe { node ->
+                    val entry = Entry(node.key, node.value)
+                    filter.invoke(entry)
+                }
+            } else {
+                filterNodesUnsafe { true } // Get all nodes
+            }
+            filteredNodes.map { Entry(it.key, it.value) }.sortedWith(entryCmp)
+        }
+
+        val list = sortedSuspend().toMutableStateList()
+
+        // Set up reactive updates outside the lock
+        scope.launch {
+            changes.collect { change ->
+                when (change) {
+                    is Put -> {
+                        val entry = Entry(change.key, change.value)
+                        val passes = filter?.invoke(entry) != false
+                        
+                        if (change.isUpdate) {
+                            // Find and remove old entry, then add new one if it passes filter
+                            val oldEntry = change.oldValue?.let { Entry(change.key, it) }
+                            if (oldEntry != null) {
+                                val oldIndex = list.indexOfFirst { it.key == change.key }
+                                if (oldIndex >= 0) {
+                                    list.removeAt(oldIndex)
+                                }
+                            }
+                            if (passes) {
+                                // Find correct insertion point using binary search
+                                var insertIndex = 0
+                                while (insertIndex < list.size && entryCmp.compare(entry, list[insertIndex]) > 0) {
+                                    insertIndex++
+                                }
+                                list.add(insertIndex, entry)
+                            }
+                        } else if (passes) {
+                            // New entry - find correct insertion point
+                            var insertIndex = 0
+                            while (insertIndex < list.size && entryCmp.compare(entry, list[insertIndex]) > 0) {
+                                insertIndex++
+                            }
+                            list.add(insertIndex, entry)
+                        }
+                    }
+                    is Removed -> {
+                        // Find and remove the entry with matching key
+                        val removeIndex = list.indexOfFirst { it.key == change.key }
+                        if (removeIndex >= 0) {
+                            list.removeAt(removeIndex)
+                        }
+                    }
+                    is Cleared -> list.clear()
+                    is Rebuild -> {
+                        list.clear()
+                        rwLock.withReadLock { list.addAll(sortedSuspend()) }
+                    }
+                }
+            }
+        }
+
+        list
+    }
+
+    /**
+     * Suspend version of getBySecondaryKey for convenient access.
+     */
+    suspend fun bySecondaryKeySuspend(keyName: String, keyValue: Any): List<ValueType> = 
+        getBySecondaryKeySuspend(keyName, keyValue)
+
+    /**
+     * Suspend batch operations inherited from TreeMap with Es-specific optimizations.
+     */
+    override suspend fun putAllSuspend(vararg entries: Pair<KeyType, ValueType>) = super.putAllSuspend(*entries)
+    override suspend fun removeAllSuspend(vararg keys: KeyType) = super.removeAllSuspend(*keys)
+
+    /**
+     * Es-specific range operations.
+     */
+    override suspend fun rangeSuspend(
+        from: KeyType, fromInclusive: Boolean,
+        to: KeyType, toInclusive: Boolean
+    ): Map<KeyType, ValueType> = super.rangeSuspend(from, fromInclusive, to, toInclusive)
 
     fun asSnapshotStateList(
         scope: CoroutineScope,
@@ -152,8 +260,22 @@ class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             Comparator { e1, e2 -> keyCmp.compare(e1.key, e2.key) }
         }
 
-        fun sorted(): List<Map.Entry<KeyType, ValueType>> =
-            entries.filter { filter?.invoke(it) != false }.sortedWith(entryCmp)
+        suspend fun sortedSuspend(): List<Map.Entry<KeyType, ValueType>> = rwLock.withReadLock {
+            // Optimized: Use unsafe node filtering with single lock  
+            val filteredNodes = if (filter != null) {
+                filterNodesUnsafe { node ->
+                    val entry = Entry(node.key, node.value)
+                    filter.invoke(entry)
+                }
+            } else {
+                filterNodesUnsafe { true } // Get all nodes
+            }
+            filteredNodes.map { Entry(it.key, it.value) }.sortedWith(entryCmp)
+        }
+        
+        fun sorted(): List<Map.Entry<KeyType, ValueType>> = runBlockingMultiplatform { 
+            sortedSuspend()
+        }
 
         val list = sorted().toMutableStateList()
 
@@ -328,18 +450,32 @@ class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             }
         }
 
-        fun getFilteredEntries(): List<Map.Entry<KeyType, ValueType>> {
-            val entries = if (secondaryKeyValue != null) {
-                // More efficient: iterate entries once instead of find() for each value
-                val secondaryValues = getBySecondaryKey(secondaryKeyName, secondaryKeyValue).toSet()
-                this.entries.filter { entry ->
-                    entry.value in secondaryValues && filter?.invoke(entry) != false
+        fun getFilteredEntries(): List<Map.Entry<KeyType, ValueType>> = runBlockingMultiplatform {
+            rwLock.withReadLock {
+                val entries = if (secondaryKeyValue != null) {
+                    // Optimized: Use unsafe methods for batch secondary index lookup
+                    val primaryKeys = secondaryIndexes[secondaryKeyName]?.get(secondaryKeyValue) ?: emptySet()
+                    primaryKeys.mapNotNull { key ->
+                        findNodeUnsafe(key)?.let { node ->
+                            val entry = Entry(key, node.value)
+                            if (filter?.invoke(entry) != false) entry else null
+                        }
+                    }
+                } else {
+                    // Optimized: Use unsafe node filtering for maximum efficiency
+                    val filteredNodes = if (filter != null) {
+                        filterNodesUnsafe { node ->
+                            val entry = Entry(node.key, node.value)
+                            filter.invoke(entry)
+                        }
+                    } else {
+                        filterNodesUnsafe { true } // Get all nodes
+                    }
+                    filteredNodes.map { Entry(it.key, it.value) }
                 }
-            } else {
-                this.entries.filter { filter?.invoke(it) != false }
-            }
 
-            return entries.sortedWith(entryCmp)
+                entries.sortedWith(entryCmp)
+            }
         }
 
         val list = getFilteredEntries().map { Entry(it.key, it.value) }.toMutableStateList()

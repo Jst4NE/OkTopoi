@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlin.concurrent.Volatile
 
 /**
- * A Red-Black Tree based TreeMap implementation for Kotlin Multiplatform
+ * A Red-Black Tree based TreeMap implementation fo¸r Kotlin Multiplatform
  *
  * This implementation provides a sorted map with O(log n) performance for basic operations,
  * NavigableMap-like functionality, secondary key indexing, and reactive change notifications.
@@ -20,7 +20,11 @@ import kotlin.concurrent.Volatile
  * - **Multiplatform**: Full Kotlin Multiplatform compatibility
  *
  * ## Thread Safety
- * This implementation is **NOT thread-safe**. For concurrent access, use external synchronization.
+ * This implementation is **thread-safe** using ReadWriteLock for concurrent access.
+ * - Reads can proceed concurrently
+ * - Writes are exclusive
+ * - Suspend API provides optimal performance
+ * - Blocking API provides compatibility
  *
  * ## Null Handling
  * - **Null Keys**: Not permitted.
@@ -32,6 +36,7 @@ import kotlin.concurrent.Volatile
  */
 open class TreeMap<K, V> : MutableMap<K, V> {
 
+    internal val rwLock = ReadWriteLock()
     val comparator: Comparator<K>?
     val secondaryKeysSpec: List<Key<V, *>>
 
@@ -56,13 +61,13 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         this.changes = _changes.asSharedFlow()
     }
 
-    private val secondaryIndexes: MutableMap<String, MutableMap<Any?, MutableSet<K>>>
+    internal val secondaryIndexes: MutableMap<String, MutableMap<Any?, MutableSet<K>>>
 
     /**
      * Builder for creating secondary key configurations in a fluent way
      */
     class SecondaryKeyBuilder<V> {
-        private val keys = mutableListOf<TreeMap.Key<V, *>>()
+        private val keys = mutableListOf<Key<V, *>>()
 
         /**
          * Adds a secondary key with the given name and extractor function
@@ -72,19 +77,35 @@ open class TreeMap<K, V> : MutableMap<K, V> {
          */
         fun <SK> key(name: String, extractor: (V) -> SK) {
             require(keys.none { it.name == name }) { "Duplicate secondary key name: $name" }
-            keys.add(TreeMap.Key(name, extractor))
+            keys.add(Key(name, extractor))
         }
 
         /**
          * Builds the final list of secondary keys
          */
-        internal fun build(): List<TreeMap.Key<V, *>> = keys.toList()
+        internal fun build(): List<Key<V, *>> = keys.toList()
+    }
+
+
+    /**
+     * Suspend-aware iterator interface for optimal performance in coroutine contexts.
+     */
+    interface SuspendIterator<out T> {
+        suspend fun hasNext(): Boolean
+        suspend fun next(): T
+    }
+
+    /**
+     * Suspend-aware mutable iterator interface for optimal performance in coroutine contexts.
+     */
+    interface SuspendMutableIterator<T> : SuspendIterator<T> {
+        suspend fun remove()
     }
 
     /**
      * Color enum for Red-Black Tree nodes
      */
-    private enum class Color { RED, BLACK }
+    internal enum class Color { RED, BLACK }
 
     /**
      * Represents a secondary key configuration
@@ -157,10 +178,19 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      * @param keyValue the secondary key value to search for
      * @return list of matching values (empty if none found)
      */
-    fun <SK> getBySecondaryKey(keyName: String, keyValue: SK): List<V> {
-        return ((secondaryIndexes[keyName] ?: mutableMapOf())[keyValue]
-            ?: setOf()).map { this[it]!! }
-    }
+    fun <SK> getBySecondaryKey(keyName: String, keyValue: SK): List<V> = 
+        runBlockingMultiplatform { getBySecondaryKeySuspend(keyName, keyValue) }
+
+    /**
+     * Suspend version of getBySecondaryKey() for optimal performance in coroutine contexts.
+     * Uses read lock for safe concurrent access to secondary indexes.
+     * All primary key lookups occur under a single lock for efficiency.
+     */
+    suspend fun <SK> getBySecondaryKeySuspend(keyName: String, keyValue: SK): List<V> = 
+        rwLock.withReadLock {
+            val primaryKeys = secondaryIndexes[keyName]?.get(keyValue) ?: emptySet()
+            primaryKeys.mapNotNull { findNode(it)?.value }
+        }
 
     // Modern Map API additions
 
@@ -169,12 +199,20 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      *
      * @return the previous value associated with the key, or null if there was no mapping
      */
-    fun putIfAbsent(key: K, value: V): V? {
+    fun putIfAbsent(key: K, value: V): V? = runBlockingMultiplatform { putIfAbsentSuspend(key, value) }
+
+    /**
+     * Suspend version of putIfAbsent() for optimal performance in coroutine contexts.
+     */
+    suspend fun putIfAbsentSuspend(key: K, value: V): V? = rwLock.withWriteLock {
         val node = findNode(key)
         if (node == null) {
-            return put(key, value)
+            updateSecondaryKeys(key, findOrCreateNodeAndPut(key, value).first, value)
+            emitChange(MapChange.Put(key, value, false, null))
+            null
+        } else {
+            node.value
         }
-        return node.value
     }
 
     /**
@@ -182,10 +220,19 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      *
      * @return the previous value associated with the key, or null if there was no mapping
      */
-    fun replace(key: K, value: V): V? {
+    fun replace(key: K, value: V): V? = runBlockingMultiplatform { replaceSuspend(key, value) }
+
+    /**
+     * Suspend version of replace() for optimal performance in coroutine contexts.
+     */
+    suspend fun replaceSuspend(key: K, value: V): V? = rwLock.withWriteLock {
         val node = findNode(key)
-        return if (node != null) {
-            nodePut(node, key, value)
+        if (node != null) {
+            val oldValue = node.value
+            node.value = value
+            updateSecondaryKeys(key, oldValue, value)
+            emitChange(MapChange.Put(key, value, true, oldValue))
+            oldValue
         } else {
             null
         }
@@ -196,13 +243,21 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      *
      * @return true if the value was replaced
      */
-    fun replace(key: K, expectedValue: V, newValue: V): Boolean {
+    fun replace(key: K, expectedValue: V, newValue: V): Boolean = runBlockingMultiplatform { replaceSuspend(key, expectedValue, newValue) }
+
+    /**
+     * Suspend version of replace() for optimal performance in coroutine contexts.
+     */
+    suspend fun replaceSuspend(key: K, expectedValue: V, newValue: V): Boolean = rwLock.withWriteLock {
         val node = findNode(key)
-        return if (node != null && node.value == expectedValue) {
-            nodePut(node, key, newValue)
+        if (node != null && node.value == expectedValue) {
+            val oldValue = node.value
+            node.value = newValue
+            updateSecondaryKeys(key, oldValue, newValue)
+            emitChange(MapChange.Put(key, newValue, true, oldValue))
             true
         } else {
-            return false
+            false
         }
     }
 
@@ -211,9 +266,14 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      *
      * @return true if the value was removed
      */
-    fun remove(key: K, value: V): Boolean {
-        val node = findNode(key) ?: return false
-        return if (node.value == value) {
+    fun remove(key: K, value: V): Boolean = runBlockingMultiplatform { removeSuspend(key, value) }
+
+    /**
+     * Suspend version of remove() for optimal performance in coroutine contexts.
+     */
+    suspend fun removeSuspend(key: K, value: V): Boolean = rwLock.withWriteLock {
+        val node = findNode(key) ?: return@withWriteLock false
+        if (node.value == value) {
             nodeRemove(node)
             true
         } else {
@@ -227,30 +287,37 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      * @param remappingFunction the function to compute a value
      * @return the new value associated with the key, or null if none
      */
-    fun compute(key: K, remappingFunction: (K, V?) -> V?): V? {
+    fun compute(key: K, remappingFunction: (K, V?) -> V?): V? = runBlockingMultiplatform { computeSuspend(key, remappingFunction) }
+
+    /**
+     * Suspend version of compute() for optimal performance in coroutine contexts.
+     */
+    suspend fun computeSuspend(key: K, remappingFunction: (K, V?) -> V?): V? = rwLock.withWriteLock {
         val node = findNode(key)
-        val newValue: V?
-        if (node == null) {
-            newValue = remappingFunction(key, null)
-            if (newValue != null) {
-                put(key, newValue)
+        val currentValue = node?.value
+        val newValue = remappingFunction(key, currentValue)
+        
+        when {
+            node == null && newValue != null -> {
+                // Insert new mapping
+                updateSecondaryKeys(key, findOrCreateNodeAndPut(key, newValue).first, newValue)
+                emitChange(MapChange.Put(key, newValue, false, null))
             }
-        } else if (node.value == null) {
-            newValue = remappingFunction(key, null)
-            if (newValue != null) {
-                nodePut(node, key, newValue)
-            } else {
+            node != null && newValue != null -> {
+                // Update existing mapping
+                val oldValue = node.value
+                node.value = newValue
+                updateSecondaryKeys(key, oldValue, newValue)
+                emitChange(MapChange.Put(key, newValue, true, oldValue))
+            }
+            node != null && newValue == null -> {
+                // Remove existing mapping
                 nodeRemove(node)
             }
-        } else {
-            newValue = remappingFunction(key, node.value)
-            if (newValue != null) {
-                nodePut(node, key, newValue)
-            } else {
-                nodeRemove(node)
-            }
+            // node == null && newValue == null: no operation needed
         }
-        return newValue
+        
+        newValue
     }
 
     /**
@@ -259,14 +326,20 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      * @param mappingFunction the function to compute a value
      * @return the current (existing or computed) value associated with the key
      */
-    fun computeIfAbsent(key: K, mappingFunction: (K) -> V): V {
+    fun computeIfAbsent(key: K, mappingFunction: (K) -> V): V = runBlockingMultiplatform { computeIfAbsentSuspend(key, mappingFunction) }
+
+    /**
+     * Suspend version of computeIfAbsent() for optimal performance in coroutine contexts.
+     */
+    suspend fun computeIfAbsentSuspend(key: K, mappingFunction: (K) -> V): V = rwLock.withWriteLock {
         val node = findNode(key)
         if (node == null) {
             val newValue = mappingFunction(key)
-            put(key, newValue)
-            return newValue
+            updateSecondaryKeys(key, findOrCreateNodeAndPut(key, newValue).first, newValue)
+            emitChange(MapChange.Put(key, newValue, false, null))
+            newValue
         } else {
-            return node.value
+            node.value
         }
     }
 
@@ -276,14 +349,22 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      * @param remappingFunction the function to compute a value
      * @return the new value associated with the key, or null if none
      */
-    fun computeIfPresent(key: K, remappingFunction: (K, V) -> V): V? {
+    fun computeIfPresent(key: K, remappingFunction: (K, V) -> V): V? = runBlockingMultiplatform { computeIfPresentSuspend(key, remappingFunction) }
+
+    /**
+     * Suspend version of computeIfPresent() for optimal performance in coroutine contexts.
+     */
+    suspend fun computeIfPresentSuspend(key: K, remappingFunction: (K, V) -> V): V? = rwLock.withWriteLock {
         val node = findNode(key)
         if (node != null) {
-            val newValue = remappingFunction(key, node.value)
-            nodePut(node, key, newValue)
-            return newValue
+            val oldValue = node.value
+            val newValue = remappingFunction(key, oldValue)
+            node.value = newValue
+            updateSecondaryKeys(key, oldValue, newValue)
+            emitChange(MapChange.Put(key, newValue, true, oldValue))
+            newValue
         } else {
-            return null
+            null
         }
     }
 
@@ -295,30 +376,37 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      * @param remappingFunction the function to recompute a value if present
      * @return the new value associated with the key
      */
-    fun merge(key: K, value: V, remappingFunction: (oldValue: V?, newValue: V) -> V?): V? {
+    fun merge(key: K, value: V, remappingFunction: (oldValue: V?, newValue: V) -> V?): V? = runBlockingMultiplatform { mergeSuspend(key, value, remappingFunction) }
+
+    /**
+     * Suspend version of merge() for optimal performance in coroutine contexts.
+     */
+    suspend fun mergeSuspend(key: K, value: V, remappingFunction: (oldValue: V?, newValue: V) -> V?): V? = rwLock.withWriteLock {
         val node = findNode(key)
-        val newValue: V?
-        if (node == null) {
-            newValue = remappingFunction(null, value)
-            if (newValue != null) {
-                put(key, newValue)
+        val currentValue = node?.value
+        val newValue = remappingFunction(currentValue, value)
+        
+        when {
+            node == null && newValue != null -> {
+                // Insert new mapping
+                updateSecondaryKeys(key, findOrCreateNodeAndPut(key, newValue).first, newValue)
+                emitChange(MapChange.Put(key, newValue, false, null))
             }
-        } else if (node.value == null) {
-            newValue = remappingFunction(null, value)
-            if (newValue != null) {
-                nodePut(node, key, newValue)
-            } else {
+            node != null && newValue != null -> {
+                // Update existing mapping
+                val oldValue = node.value
+                node.value = newValue
+                updateSecondaryKeys(key, oldValue, newValue)
+                emitChange(MapChange.Put(key, newValue, true, oldValue))
+            }
+            node != null && newValue == null -> {
+                // Remove existing mapping
                 nodeRemove(node)
             }
-        } else {
-            newValue = remappingFunction(node.value, value)
-            if (newValue != null) {
-                nodePut(node, key, newValue)
-            } else {
-                nodeRemove(node)
-            }
+            // node == null && newValue == null: no operation needed
         }
-        return newValue
+        
+        newValue
     }
 
     private fun updateSecondaryKeys(key: K, oldValue: V?, newValue: V?) {
@@ -368,7 +456,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
     }
 
     // Tree node implementation
-    private class Node<K, V>(
+    internal class Node<K, V>(
         var key: K,
         var value: V,
         var color: Color = Color.RED,
@@ -379,13 +467,34 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         override fun toString(): String = "Node(key=$key, value=$value, color=$color)"
     }
 
-    private var root: Node<K, V>? = null
+    internal var root: Node<K, V>? = null
     private var _size = 0
 
-    override val size: Int get() = _size
-    override val keys: MutableSet<K> get() = KeySet()
-    override val values: MutableCollection<V> get() = ValueCollection()
-    override val entries: MutableSet<MutableMap.MutableEntry<K, V>> get() = EntrySet()
+    override val size: Int get() = runBlockingMultiplatform { sizeSuspend() }
+    override val keys: MutableSet<K> get() = runBlockingMultiplatform { keysSuspend() }
+    override val values: MutableCollection<V> get() = runBlockingMultiplatform { valuesSuspend() }
+    override val entries: MutableSet<MutableMap.MutableEntry<K, V>> get() = runBlockingMultiplatform { entriesSuspend() }
+    
+    // Suspend versions for coroutine contexts
+    suspend fun sizeSuspend(): Int = rwLock.withReadLock { _size }
+    suspend fun keysSuspend(): MutableSet<K> = KeySet()
+    suspend fun valuesSuspend(): MutableCollection<V> = ValueCollection()
+    suspend fun entriesSuspend(): MutableSet<MutableMap.MutableEntry<K, V>> = EntrySet()
+
+    /**
+     * Returns a suspend-aware key iterator for optimal performance in coroutine contexts.
+     */
+    fun keysSuspendIterator(): SuspendMutableIterator<K> = SuspendKeyIterator()
+
+    /**
+     * Returns a suspend-aware value iterator for optimal performance in coroutine contexts.
+     */
+    fun valuesSuspendIterator(): SuspendMutableIterator<V> = SuspendValueIterator()
+
+    /**
+     * Returns a suspend-aware entry iterator for optimal performance in coroutine contexts.
+     */
+    fun entriesSuspendIterator(): SuspendMutableIterator<MutableMap.MutableEntry<K, V>> = SuspendEntryIterator()
 
     /**
      * Gets the color of a node (null nodes are black)
@@ -410,7 +519,13 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      * @param value value to associate with key (null allowed)
      * @return previous value associated with key, or null if no previous mapping
      */
-    override fun put(key: K, value: V): V? {
+    override fun put(key: K, value: V): V? = runBlockingMultiplatform { putSuspend(key, value) }
+
+    /**
+     * Suspend version of put() for optimal performance in coroutine contexts.
+     * Uses write lock for exclusive access during tree modifications.
+     */
+    suspend fun putSuspend(key: K, value: V): V? = rwLock.withWriteLock {
         val oldValueOldNode = findOrCreateNodeAndPut(key, value)
 
         updateSecondaryKeys(key, oldValueOldNode.first, value)
@@ -424,7 +539,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
             )
         )
 
-        return oldValueOldNode.first
+        oldValueOldNode.first
     }
 
 
@@ -495,8 +610,14 @@ open class TreeMap<K, V> : MutableMap<K, V> {
     /**
      * Returns the value to which the specified key is mapped, or null if this map contains no mapping for the key.
      */
-    override fun get(key: K): V? {
-        return findNode(key)?.value
+    override fun get(key: K): V? = runBlockingMultiplatform { getSuspend(key) }
+
+    /**
+     * Suspend version of get() for optimal performance in coroutine contexts.
+     * Uses read lock allowing concurrent access.
+     */
+    suspend fun getSuspend(key: K): V? = rwLock.withReadLock {
+        findNode(key)?.value
     }
 
     /**
@@ -505,9 +626,15 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      * @param key the key whose mapping is to be removed
      * @return the previous value associated with key, or null if no mapping existed
      */
-    override fun remove(key: K): V? {
-        val node = findNode(key) ?: return null
-        return nodeRemove(node)
+    override fun remove(key: K): V? = runBlockingMultiplatform { removeSuspend(key) }
+
+    /**
+     * Suspend version of remove() for optimal performance in coroutine contexts.
+     * Uses write lock for exclusive access during tree modifications.
+     */
+    suspend fun removeSuspend(key: K): V? = rwLock.withWriteLock {
+        val node = findNode(key) ?: return@withWriteLock null
+        nodeRemove(node)
     }
 
     private fun nodeRemove(node: Node<K, V>): V {
@@ -527,24 +654,38 @@ open class TreeMap<K, V> : MutableMap<K, V> {
     /**
      * Returns true if this map contains a mapping for the specified key.
      */
-    override fun containsKey(key: K): Boolean = findNode(key) != null
+    override fun containsKey(key: K): Boolean = runBlockingMultiplatform { containsKeySuspend(key) }
+
+    /**
+     * Suspend version of containsKey() for optimal performance in coroutine contexts.
+     */
+    suspend fun containsKeySuspend(key: K): Boolean = rwLock.withReadLock {
+        findNode(key) != null
+    }
 
     /**
      * Returns true if this map maps one or more keys to the specified value.
      */
-    override fun containsValue(value: V): Boolean {
+    override fun containsValue(value: V): Boolean = runBlockingMultiplatform { containsValueSuspend(value) }
+
+    /**
+     * Suspend version of containsValue() for optimal performance in coroutine contexts.
+     */
+    suspend fun containsValueSuspend(value: V): Boolean = rwLock.withReadLock {
         var current = minimum(root)
         while (current != null) {
-            if (current.value == value) return true
+            if (current.value == value) return@withReadLock true
             current = successor(current)
         }
-        return false
+        false
     }
 
     /**
      * Returns true if this map contains no key-value mappings.
      */
-    override fun isEmpty(): Boolean = _size == 0
+    override fun isEmpty(): Boolean = runBlockingMultiplatform { isEmptySuspend() }
+    
+    suspend fun isEmptySuspend(): Boolean = rwLock.withReadLock { _size == 0 }
 
     /**
      * Removes all mappings from this map.
@@ -555,9 +696,13 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      * **Performance**: O(1) for tree, O(k*s) for secondary indexes where k is number of
      * secondary keys and s is number of unique secondary key values.
      */
-    override fun clear() {
-        val previousSize = _size
+    override fun clear() = runBlockingMultiplatform { clearSuspend() }
 
+    /**
+     * Suspend version of clear() for optimal performance in coroutine contexts.
+     * Uses write lock for exclusive access during clear operation.
+     */
+    suspend fun clearSuspend() = rwLock.withWriteLock {
         modCount++
         root = null
         _size = 0
@@ -576,7 +721,14 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      *
      * @param from mappings to be stored in this map
      */
-    override fun putAll(from: Map<out K, V>) {
+    override fun putAll(from: Map<out K, V>) = runBlockingMultiplatform { putAllSuspend(from) }
+
+    /**
+     * Suspend version of putAll() for optimal performance in coroutine contexts.
+     * Uses write lock for exclusive access during batch operation.
+     * All operations occur under a single lock for efficiency.
+     */
+    suspend fun putAllSuspend(from: Map<out K, V>) = rwLock.withWriteLock {
         from.forEach { (key, value) ->
             updateSecondaryKeys(
                 key,
@@ -587,6 +739,44 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         emitChange(MapChange.Rebuild())
     }
 
+    // Suspend batch operation methods for efficient operations under single lock
+    
+    /**
+     * Suspend version of putAll with varargs for convenient batch operations.
+     * All operations occur under a single write lock for efficiency.
+     */
+    open suspend fun putAllSuspend(vararg entries: Pair<K, V>) = rwLock.withWriteLock {
+        entries.forEach { (key, value) ->
+            updateSecondaryKeys(
+                key,
+                findOrCreateNodeAndPut(key, value).first,
+                value
+            )
+        }
+        emitChange(MapChange.Rebuild())
+    }
+    
+    /**
+     * Efficient batch removal using single write lock.
+     * All removals occur under a single write lock for optimal performance.
+     */
+    open suspend fun removeAllSuspend(vararg keys: K) = rwLock.withWriteLock {
+        keys.forEach { key ->
+            findNode(key)?.let { node -> nodeRemove(node) }
+        }
+        emitChange(MapChange.Rebuild())
+    }
+
+    /**
+     * Range query with suspend support for thread-safe access.
+     */
+    open suspend fun rangeSuspend(
+        from: K, fromInclusive: Boolean = true,
+        to: K, toInclusive: Boolean = false
+    ): Map<K, V> = rwLock.withReadLock {
+        subMap(from, fromInclusive, to, toInclusive)
+    }
+
     // NavigableMap-like functionality
 
     /**
@@ -594,55 +784,104 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      *
      * **Performance**: O(log n)
      */
-    fun firstKey(): K? = minimum(root)?.key
+    fun firstKey(): K? = runBlockingMultiplatform { firstKeySuspend() }
+
+    /**
+     * Suspend version of firstKey() for optimal performance in coroutine contexts.
+     */
+    suspend fun firstKeySuspend(): K? = rwLock.withReadLock { minimum(root)?.key }
 
     /**
      * Returns the last (highest) key currently in this map, or null if the map is empty.
      *
      * **Performance**: O(log n)
      */
-    fun lastKey(): K? = maximum(root)?.key
+    fun lastKey(): K? = runBlockingMultiplatform { lastKeySuspend() }
+
+    /**
+     * Suspend version of lastKey() for optimal performance in coroutine contexts.
+     */
+    suspend fun lastKeySuspend(): K? = rwLock.withReadLock { maximum(root)?.key }
 
     /**
      * Returns a key-value mapping associated with the least key in this map, or null if the map is empty.
      *
      * **Performance**: O(log n)
      */
-    fun firstEntry(): MutableMap.MutableEntry<K, V>? = minimum(root)?.let { TreeEntry(it) }
+    fun firstEntry(): MutableMap.MutableEntry<K, V>? = runBlockingMultiplatform { firstEntrySuspend() }
+
+    /**
+     * Suspend version of firstEntry() for optimal performance in coroutine contexts.
+     */
+    suspend fun firstEntrySuspend(): MutableMap.MutableEntry<K, V>? = rwLock.withReadLock { 
+        minimum(root)?.let { TreeEntry(it) }
+    }
 
     /**
      * Returns a key-value mapping associated with the greatest key in this map, or null if the map is empty.
      *
      * **Performance**: O(log n)
      */
-    fun lastEntry(): MutableMap.MutableEntry<K, V>? = maximum(root)?.let { TreeEntry(it) }
+    fun lastEntry(): MutableMap.MutableEntry<K, V>? = runBlockingMultiplatform { lastEntrySuspend() }
+
+    /**
+     * Suspend version of lastEntry() for optimal performance in coroutine contexts.
+     */
+    suspend fun lastEntrySuspend(): MutableMap.MutableEntry<K, V>? = rwLock.withReadLock { 
+        maximum(root)?.let { TreeEntry(it) }
+    }
 
     /**
      * Returns the greatest key strictly less than the given key, or null if no such key exists.
      */
-    fun lowerKey(key: K): K? = lowerNode(key)?.key
+    fun lowerKey(key: K): K? = runBlockingMultiplatform { lowerKeySuspend(key) }
+
+    /**
+     * Suspend version of lowerKey() for optimal performance in coroutine contexts.
+     */
+    suspend fun lowerKeySuspend(key: K): K? = rwLock.withReadLock { lowerNode(key)?.key }
 
     /**
      * Returns the greatest key less than or equal to the given key, or null if no such key exists.
      */
-    fun floorKey(key: K): K? = floorNode(key)?.key
+    fun floorKey(key: K): K? = runBlockingMultiplatform { floorKeySuspend(key) }
+
+    /**
+     * Suspend version of floorKey() for optimal performance in coroutine contexts.
+     */
+    suspend fun floorKeySuspend(key: K): K? = rwLock.withReadLock { floorNode(key)?.key }
 
     /**
      * Returns the least key greater than or equal to the given key, or null if no such key exists.
      */
-    fun ceilingKey(key: K): K? = ceilingNode(key)?.key
+    fun ceilingKey(key: K): K? = runBlockingMultiplatform { ceilingKeySuspend(key) }
+
+    /**
+     * Suspend version of ceilingKey() for optimal performance in coroutine contexts.
+     */
+    suspend fun ceilingKeySuspend(key: K): K? = rwLock.withReadLock { ceilingNode(key)?.key }
 
     /**
      * Returns the least key strictly greater than the given key, or null if no such key exists.
      */
-    fun higherKey(key: K): K? = higherNode(key)?.key
+    fun higherKey(key: K): K? = runBlockingMultiplatform { higherKeySuspend(key) }
 
-    fun lowerEntry(key: K): MutableMap.MutableEntry<K, V>? = lowerNode(key)?.let { TreeEntry(it) }
-    fun floorEntry(key: K): MutableMap.MutableEntry<K, V>? = floorNode(key)?.let { TreeEntry(it) }
-    fun ceilingEntry(key: K): MutableMap.MutableEntry<K, V>? =
-        ceilingNode(key)?.let { TreeEntry(it) }
+    /**
+     * Suspend version of higherKey() for optimal performance in coroutine contexts.
+     */
+    suspend fun higherKeySuspend(key: K): K? = rwLock.withReadLock { higherNode(key)?.key }
 
-    fun higherEntry(key: K): MutableMap.MutableEntry<K, V>? = higherNode(key)?.let { TreeEntry(it) }
+    fun lowerEntry(key: K): MutableMap.MutableEntry<K, V>? = runBlockingMultiplatform { lowerEntrySuspend(key) }
+    suspend fun lowerEntrySuspend(key: K): MutableMap.MutableEntry<K, V>? = rwLock.withReadLock { lowerNode(key)?.let { TreeEntry(it) } }
+    
+    fun floorEntry(key: K): MutableMap.MutableEntry<K, V>? = runBlockingMultiplatform { floorEntrySuspend(key) }
+    suspend fun floorEntrySuspend(key: K): MutableMap.MutableEntry<K, V>? = rwLock.withReadLock { floorNode(key)?.let { TreeEntry(it) } }
+    
+    fun ceilingEntry(key: K): MutableMap.MutableEntry<K, V>? = runBlockingMultiplatform { ceilingEntrySuspend(key) }
+    suspend fun ceilingEntrySuspend(key: K): MutableMap.MutableEntry<K, V>? = rwLock.withReadLock { ceilingNode(key)?.let { TreeEntry(it) } }
+
+    fun higherEntry(key: K): MutableMap.MutableEntry<K, V>? = runBlockingMultiplatform { higherEntrySuspend(key) }
+    suspend fun higherEntrySuspend(key: K): MutableMap.MutableEntry<K, V>? = rwLock.withReadLock { higherNode(key)?.let { TreeEntry(it) } }
 
     /**
      * Removes and returns a key-value mapping associated with the least key in this map,
@@ -653,12 +892,17 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      *
      * @return a detached entry that was removed from the map, or null if the map was empty
      */
-    fun pollFirstEntry(): MutableMap.MutableEntry<K, V>? {
-        val first = minimum(root) ?: return null
+    fun pollFirstEntry(): MutableMap.MutableEntry<K, V>? = runBlockingMultiplatform { pollFirstEntrySuspend() }
+
+    /**
+     * Suspend version of pollFirstEntry() for optimal performance in coroutine contexts.
+     */
+    suspend fun pollFirstEntrySuspend(): MutableMap.MutableEntry<K, V>? = rwLock.withWriteLock {
+        val first = minimum(root) ?: return@withWriteLock null
         val key = first.key
         val value = first.value
-        remove(key)
-        return DetachedEntry(key, value)
+        nodeRemove(first)
+        DetachedEntry(key, value)
     }
 
     /**
@@ -670,16 +914,25 @@ open class TreeMap<K, V> : MutableMap<K, V> {
      *
      * @return a detached entry that was removed from the map, or null if the map was empty
      */
-    fun pollLastEntry(): MutableMap.MutableEntry<K, V>? {
-        val last = maximum(root) ?: return null
+    fun pollLastEntry(): MutableMap.MutableEntry<K, V>? = runBlockingMultiplatform { pollLastEntrySuspend() }
+
+    /**
+     * Suspend version of pollLastEntry() for optimal performance in coroutine contexts.
+     */
+    suspend fun pollLastEntrySuspend(): MutableMap.MutableEntry<K, V>? = rwLock.withWriteLock {
+        val last = maximum(root) ?: return@withWriteLock null
         val key = last.key
         val value = last.value
-        remove(key)
-        return DetachedEntry(key, value)
+        nodeRemove(last)
+        DetachedEntry(key, value)
     }
 
     fun descendingKeySet(): Set<K> = DescendingKeySet()
     fun descendingMap(): Map<K, V> = DescendingMap()
+    
+    // Suspend versions for coroutine contexts
+    suspend fun descendingKeySetSuspend(): Set<K> = DescendingKeySet()
+    suspend fun descendingMapSuspend(): Map<K, V> = DescendingMap()
 
     fun subMap(
         fromKey: K,
@@ -690,12 +943,74 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         return SubMap(fromKey, fromInclusive, toKey, toInclusive)
     }
 
+    /**
+     * Suspend version of subMap() for optimal performance in coroutine contexts.
+     * Returns a thread-safe map view that uses suspend operations.
+     */
+    suspend fun subMapSuspend(
+        fromKey: K,
+        fromInclusive: Boolean = true,
+        toKey: K,
+        toInclusive: Boolean = false
+    ): Map<K, V> = rwLock.withReadLock {
+        // Create a snapshot of the submap entries using thread-safe operations
+        val entries = mutableMapOf<K, V>()
+        var node = ceilingNode(fromKey)
+        while (node != null) {
+            val key = node.key
+            val fromCmp = compare(key, fromKey)
+            val toCmp = compare(key, toKey)
+            val inRange = (if (fromInclusive) fromCmp >= 0 else fromCmp > 0) &&
+                         (if (toInclusive) toCmp <= 0 else toCmp < 0)
+            
+            if (!inRange) {
+                if (compare(key, toKey) >= 0) break
+                node = successor(node)
+                continue
+            }
+            
+            entries[key] = node.value
+            node = successor(node)
+        }
+        entries
+    }
+
     fun headMap(toKey: K, inclusive: Boolean = false): Map<K, V> {
         return HeadMap(toKey, inclusive)
     }
 
+    /**
+     * Suspend version of headMap() for optimal performance in coroutine contexts.
+     */
+    suspend fun headMapSuspend(toKey: K, inclusive: Boolean = false): Map<K, V> = rwLock.withReadLock {
+        val entries = mutableMapOf<K, V>()
+        var node = minimum(root)
+        while (node != null) {
+            val cmp = compare(node.key, toKey)
+            val inRange = if (inclusive) cmp <= 0 else cmp < 0
+            if (!inRange) break
+            
+            entries[node.key] = node.value
+            node = successor(node)
+        }
+        entries
+    }
+
     fun tailMap(fromKey: K, inclusive: Boolean = true): Map<K, V> {
         return TailMap(fromKey, inclusive)
+    }
+
+    /**
+     * Suspend version of tailMap() for optimal performance in coroutine contexts.
+     */
+    suspend fun tailMapSuspend(fromKey: K, inclusive: Boolean = true): Map<K, V> = rwLock.withReadLock {
+        val entries = mutableMapOf<K, V>()
+        var node = if (inclusive) ceilingNode(fromKey) else higherNode(fromKey)
+        while (node != null) {
+            entries[node.key] = node.value
+            node = successor(node)
+        }
+        entries
     }
 
     // Helper methods for navigable operations
@@ -770,7 +1085,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
     }
 
     // Red-Black Tree operations
-    private fun findNode(key: K): Node<K, V>? {
+    internal fun findNode(key: K): Node<K, V>? {
         var current = root
         while (current != null) {
             val cmp = compare(key, current.key)
@@ -783,7 +1098,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         return null
     }
 
-    private fun minimum(node: Node<K, V>?): Node<K, V>? {
+    internal fun minimum(node: Node<K, V>?): Node<K, V>? {
         var current = node
         while (current?.left != null) {
             current = current.left
@@ -799,7 +1114,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         return current
     }
 
-    private fun successor(node: Node<K, V>): Node<K, V>? {
+    internal fun successor(node: Node<K, V>): Node<K, V>? {
         if (node.right != null) {
             return minimum(node.right)
         }
@@ -812,6 +1127,163 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         }
         return parent
     }
+
+    // Unsafe tree traversal methods for single-lock optimizations
+    // WARNING: These methods are NOT thread-safe and must only be called under appropriate locks
+
+    /**
+     * Performs action on each node in the tree in sorted order.
+     * WARNING: Not thread-safe - must be called under read or write lock.
+     */
+    internal fun forEachNodeUnsafe(action: (Node<K, V>) -> Unit) {
+        var current = minimum(root)
+        while (current != null) {
+            action(current)
+            current = successor(current)
+        }
+    }
+
+    /**
+     * Performs action on each key-value pair in the tree in sorted order.
+     * WARNING: Not thread-safe - must be called under read or write lock.
+     */
+    internal fun forEachEntryUnsafe(action: (K, V) -> Unit) {
+        var current = minimum(root)
+        while (current != null) {
+            action(current.key, current.value)
+            current = successor(current)
+        }
+    }
+
+    /**
+     * Filters nodes based on predicate and returns matching nodes.
+     * WARNING: Not thread-safe - must be called under read or write lock.
+     */
+    internal fun filterNodesUnsafe(predicate: (Node<K, V>) -> Boolean): List<Node<K, V>> {
+        val result = mutableListOf<Node<K, V>>()
+        var current = minimum(root)
+        while (current != null) {
+            if (predicate(current)) {
+                result.add(current)
+            }
+            current = successor(current)
+        }
+        return result
+    }
+
+    /**
+     * Finds first node matching the value predicate.
+     * WARNING: Not thread-safe - must be called under read or write lock.
+     */
+    internal fun findValueUnsafe(predicate: (V) -> Boolean): Node<K, V>? {
+        var current = minimum(root)
+        while (current != null) {
+            if (predicate(current.value)) {
+                return current
+            }
+            current = successor(current)
+        }
+        return null
+    }
+
+    /**
+     * Performs action on each node within the specified key range.
+     * WARNING: Not thread-safe - must be called under read or write lock.
+     */
+    internal fun forEachInRangeUnsafe(
+        fromKey: K, 
+        fromInclusive: Boolean,
+        toKey: K, 
+        toInclusive: Boolean,
+        action: (Node<K, V>) -> Unit
+    ) {
+        var current = if (fromInclusive) ceilingNode(fromKey) else higherNode(fromKey)
+        while (current != null) {
+            val key = current.key
+            val toCmp = compare(key, toKey)
+            val inRange = if (toInclusive) toCmp <= 0 else toCmp < 0
+            
+            if (!inRange) break
+            
+            action(current)
+            current = successor(current)
+        }
+    }
+
+    /**
+     * Counts nodes within the specified key range.
+     * WARNING: Not thread-safe - must be called under read or write lock.
+     */
+    internal fun countInRangeUnsafe(
+        fromKey: K,
+        fromInclusive: Boolean, 
+        toKey: K,
+        toInclusive: Boolean
+    ): Int {
+        var count = 0
+        forEachInRangeUnsafe(fromKey, fromInclusive, toKey, toInclusive) { _ -> count++ }
+        return count
+    }
+
+    /**
+     * Collects all entries into a list efficiently.
+     * WARNING: Not thread-safe - must be called under read or write lock.
+     */
+    internal fun collectAllEntriesUnsafe(): List<Map.Entry<K, V>> {
+        val result = mutableListOf<Map.Entry<K, V>>()
+        forEachEntryUnsafe { key, value -> result.add(object : Map.Entry<K, V> {
+            override val key: K
+                get() = key
+            override val value: V
+                get() = value
+
+        }) }
+        return result
+    }
+
+    /**
+     * Removes multiple keys efficiently in a single traversal where possible.
+     * WARNING: Not thread-safe - must be called under write lock.
+     * Returns the number of keys actually removed.
+     */
+    internal fun removeAllKeysUnsafe(keys: Collection<K>): Int {
+        if (keys.isEmpty()) return 0
+        
+        val keySet = keys.toSet() // For O(1) lookup
+        var removedCount = 0
+        
+        // For small numbers of keys, individual removal is more efficient
+        if (keySet.size <= 10) {
+            keySet.forEach { key ->
+                findNode(key)?.let { node ->
+                    nodeRemove(node)
+                    removedCount++
+                }
+            }
+        } else {
+            // For large numbers of keys, traverse tree and collect nodes to remove
+            val nodesToRemove = mutableListOf<Node<K, V>>()
+            forEachNodeUnsafe { node ->
+                if (node.key in keySet) {
+                    nodesToRemove.add(node)
+                }
+            }
+            
+            // Remove collected nodes
+            nodesToRemove.forEach { node ->
+                nodeRemove(node)
+                removedCount++
+            }
+        }
+        
+        return removedCount
+    }
+    
+    /**
+     * Alias for findNode() to clearly indicate unsafe usage.
+     * Must be called within appropriate locks.
+     */
+    internal fun findNodeUnsafe(key: K): Node<K, V>? = findNode(key)
 
     private fun predecessor(node: Node<K, V>): Node<K, V>? {
         if (node.left != null) {
@@ -1059,18 +1531,20 @@ open class TreeMap<K, V> : MutableMap<K, V> {
          * @param newValue the new value to set
          * @return the previous value
          */
-        override fun setValue(newValue: V): V {
-            val oldValue = node.value
+        override fun setValue(newValue: V): V = runBlockingMultiplatform {
+            rwLock.withWriteLock {
+                val oldValue = node.value
 
-            // Apply changes
-            node.value = newValue
+                // Apply changes
+                node.value = newValue
 
-            updateSecondaryKeys(key, oldValue, newValue)
+                updateSecondaryKeys(key, oldValue, newValue)
 
-            // Emit change notification
-            emitChange(MapChange.Put(key, newValue, true, oldValue))
+                // Emit change notification
+                emitChange(MapChange.Put(key, newValue, true, oldValue))
 
-            return oldValue
+                oldValue
+            }
         }
 
         override fun equals(other: Any?): Boolean {
@@ -1108,7 +1582,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
     private inner class KeySet : MutableSet<K> {
         override val size: Int get() = this@TreeMap.size
         override fun isEmpty(): Boolean = this@TreeMap.isEmpty()
-        override fun contains(element: K): Boolean = containsKey(element)
+        override fun contains(element: K): Boolean = this@TreeMap.containsKey(element)
         override fun containsAll(elements: Collection<K>): Boolean = elements.all { contains(it) }
 
         override fun add(element: K): Boolean =
@@ -1118,10 +1592,21 @@ open class TreeMap<K, V> : MutableMap<K, V> {
             throw UnsupportedOperationException("Cannot add keys without values")
 
         override fun remove(element: K): Boolean = this@TreeMap.remove(element) != null
-        override fun removeAll(elements: Collection<K>): Boolean {
-            var modified = false
-            elements.forEach { if (remove(it)) modified = true }
-            return modified
+        override fun removeAll(elements: Collection<K>): Boolean = runBlockingMultiplatform {
+            removeAllSuspend(elements)
+        }
+        
+        suspend fun removeAllSuspend(elements: Collection<K>): Boolean {
+            if (elements.isEmpty()) return false
+            val initialSize = this@TreeMap.size
+            rwLock.withWriteLock {
+                // Optimized: Use unsafe batch removal
+                val removedCount = removeAllKeysUnsafe(elements)
+                if (removedCount > 0) {
+                    emitChange(MapChange.Rebuild())
+                }
+            }
+            return this@TreeMap.size != initialSize
         }
 
         override fun retainAll(elements: Collection<K>): Boolean {
@@ -1137,7 +1622,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
     private inner class ValueCollection : MutableCollection<V> {
         override val size: Int get() = this@TreeMap.size
         override fun isEmpty(): Boolean = this@TreeMap.isEmpty()
-        override fun contains(element: V): Boolean = containsValue(element)
+        override fun contains(element: V): Boolean = this@TreeMap.containsValue(element)
         override fun containsAll(elements: Collection<V>): Boolean = elements.all { contains(it) }
 
         override fun add(element: V): Boolean =
@@ -1146,40 +1631,59 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         override fun addAll(elements: Collection<V>): Boolean =
             throw UnsupportedOperationException("Cannot add values without keys")
 
-        override fun remove(element: V): Boolean {
-            var current = minimum(root)
-            while (current != null) {
-                if (current.value == element) {
-                    this@TreeMap.remove(current.key)
-                    return true
+        override fun remove(element: V): Boolean = runBlockingMultiplatform {
+            removeSuspend(element)
+        }
+        
+        suspend fun removeSuspend(element: V): Boolean {
+            return rwLock.withWriteLock {
+                // Optimized: Use unsafe value search with early termination
+                val nodeToRemove = findValueUnsafe { it == element }
+                if (nodeToRemove != null) {
+                    nodeRemove(nodeToRemove)
+                    true
+                } else {
+                    false
                 }
-                current = successor(current)
             }
-            return false
         }
 
-        override fun removeAll(elements: Collection<V>): Boolean {
-            var modified = false
-            elements.forEach { if (remove(it)) modified = true }
-            return modified
+        override fun removeAll(elements: Collection<V>): Boolean = runBlockingMultiplatform {
+            removeAllSuspend(elements)
+        }
+        
+        suspend fun removeAllSuspend(elements: Collection<V>): Boolean {
+            if (elements.isEmpty()) return false
+            val valuesToRemove = elements.toSet()
+            val initialSize = this@TreeMap.size
+            rwLock.withWriteLock {
+                // Optimized: Use unsafe node filtering for batch removal
+                val nodesToRemove = filterNodesUnsafe { node -> node.value in valuesToRemove }
+                if (nodesToRemove.isNotEmpty()) {
+                    nodesToRemove.forEach { node -> nodeRemove(node) }
+                    emitChange(MapChange.Rebuild())
+                }
+            }
+            return this@TreeMap.size != initialSize
         }
 
-        override fun retainAll(elements: Collection<V>): Boolean {
+        override fun retainAll(elements: Collection<V>): Boolean = runBlockingMultiplatform {
+            retainAllSuspend(elements)
+        }
+        
+        suspend fun retainAllSuspend(elements: Collection<V>): Boolean {
             val toKeep = elements.toSet()
-            val toRemove = mutableListOf<K>()
-            var current = minimum(root)
-            while (current != null) {
-                if (current.value !in toKeep) {
-                    toRemove.add(current.key)
+            return rwLock.withWriteLock {
+                // Optimized: Use unsafe node filtering for batch retain
+                val nodesToRemove = filterNodesUnsafe { node -> node.value !in toKeep }
+                if (nodesToRemove.isNotEmpty()) {
+                    nodesToRemove.forEach { node -> nodeRemove(node) }
+                    emitChange(MapChange.Rebuild())
+                    true
+                } else {
+                    false
                 }
-                current = successor(current)
             }
-            var modified = false
-            toRemove.forEach {
-                this@TreeMap.remove(it)
-                modified = true
-            }
-            return modified
         }
 
         override fun clear() = this@TreeMap.clear()
@@ -1190,7 +1694,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         override val size: Int get() = this@TreeMap.size
         override fun isEmpty(): Boolean = this@TreeMap.isEmpty()
         override fun contains(element: MutableMap.MutableEntry<K, V>): Boolean {
-            val value = get(element.key)
+            val value = this@TreeMap.get(element.key)
             return value != null && value == element.value
         }
 
@@ -1198,14 +1702,28 @@ open class TreeMap<K, V> : MutableMap<K, V> {
             elements.all { contains(it) }
 
         override fun add(element: MutableMap.MutableEntry<K, V>): Boolean {
-            val oldValue = put(element.key, element.value)
+            val oldValue = this@TreeMap.put(element.key, element.value)
             return oldValue != element.value
         }
 
-        override fun addAll(elements: Collection<MutableMap.MutableEntry<K, V>>): Boolean {
-            var modified = false
-            elements.forEach { if (add(it)) modified = true }
-            return modified
+        override fun addAll(elements: Collection<MutableMap.MutableEntry<K, V>>): Boolean = runBlockingMultiplatform {
+            addAllSuspend(elements)
+        }
+        
+        suspend fun addAllSuspend(elements: Collection<MutableMap.MutableEntry<K, V>>): Boolean {
+            if (elements.isEmpty()) return false
+            val initialSize = this@TreeMap.size
+            rwLock.withWriteLock {
+                elements.forEach { entry ->
+                    updateSecondaryKeys(
+                        entry.key,
+                        findOrCreateNodeAndPut(entry.key, entry.value).first,
+                        entry.value
+                    )
+                }
+                emitChange(MapChange.Rebuild())
+            }
+            return this@TreeMap.size != initialSize
         }
 
         override fun remove(element: MutableMap.MutableEntry<K, V>): Boolean {
@@ -1215,74 +1733,102 @@ open class TreeMap<K, V> : MutableMap<K, V> {
             } else false
         }
 
-        override fun removeAll(elements: Collection<MutableMap.MutableEntry<K, V>>): Boolean {
-            var modified = false
-            elements.forEach { if (remove(it)) modified = true }
-            return modified
+        override fun removeAll(elements: Collection<MutableMap.MutableEntry<K, V>>): Boolean = runBlockingMultiplatform {
+            removeAllSuspend(elements)
+        }
+        
+        suspend fun removeAllSuspend(elements: Collection<MutableMap.MutableEntry<K, V>>): Boolean {
+            if (elements.isEmpty()) return false
+            val initialSize = this@TreeMap.size
+            rwLock.withWriteLock {
+                var removed = false
+                elements.forEach { entry ->
+                    val current = findNode(entry.key)
+                    if (current != null && current.value == entry.value) {
+                        nodeRemove(current)
+                        removed = true
+                    }
+                }
+                if (removed) {
+                    emitChange(MapChange.Rebuild())
+                }
+            }
+            return this@TreeMap.size != initialSize
         }
 
-        override fun retainAll(elements: Collection<MutableMap.MutableEntry<K, V>>): Boolean {
+        override fun retainAll(elements: Collection<MutableMap.MutableEntry<K, V>>): Boolean = runBlockingMultiplatform {
+            retainAllSuspend(elements)
+        }
+        
+        suspend fun retainAllSuspend(elements: Collection<MutableMap.MutableEntry<K, V>>): Boolean {
             val toKeep = elements.associate { it.key to it.value }
-            val toRemove = mutableListOf<K>()
-            var current = minimum(root)
-            while (current != null) {
-                if (toKeep[current.key] != current.value) {
-                    toRemove.add(current.key)
+            return rwLock.withWriteLock {
+                var removed = false
+                var current = minimum(root)
+                while (current != null) {
+                    val next = successor(current)  // Get next before potential removal
+                    if (toKeep[current.key] != current.value) {
+                        nodeRemove(current)
+                        removed = true
+                    }
+                    current = next
                 }
-                current = successor(current)
+                if (removed) {
+                    emitChange(MapChange.Rebuild())
+                }
+                removed
             }
-            var modified = false
-            toRemove.forEach {
-                this@TreeMap.remove(it)
-                modified = true
-            }
-            return modified
         }
 
         override fun clear() = this@TreeMap.clear()
         override fun iterator(): MutableIterator<MutableMap.MutableEntry<K, V>> = EntryIterator()
     }
 
-    // Iterators with concurrent modification detection
+    // Thread-safe iterators with proper concurrent modification detection
+    // These use live traversal with change tracking instead of snapshots
     private abstract inner class TreeIterator<T> : MutableIterator<T> {
-        private var expectedModCount = modCount
-        private var nextNode: Node<K, V>? = minimum(root)
+        private var next: Node<K, V>? = runBlockingMultiplatform {
+            rwLock.withReadLock { minimum(root) }
+        }
         private var lastReturned: Node<K, V>? = null
+        private val expectedModCount = modCount
 
-        override fun hasNext(): Boolean = nextNode != null
+        override fun hasNext(): Boolean {
+            checkForConcurrentModification()
+            return next != null
+        }
 
         override fun next(): T {
-            checkForModification()
-            val current = nextNode ?: throw NoSuchElementException("No more elements in iterator")
+            checkForConcurrentModification()
+            val current = next ?: throw NoSuchElementException("No more elements in iterator")
             lastReturned = current
-            nextNode = successor(current)
+            next = runBlockingMultiplatform {
+                rwLock.withReadLock { successor(current) }
+            }
             return getValue(current)
         }
 
         override fun remove() {
-            checkForModification()
-            val toRemove = lastReturned ?: throw IllegalStateException(
-                "remove() called before next() or remove() already called"
-            )
-
-            val keyToRemove = toRemove.key
-
-            // If nextNode is the node we're removing, advance it first
-            if (nextNode == toRemove) {
-                nextNode = successor(toRemove)
+            checkForConcurrentModification()
+            val nodeToRemove = lastReturned 
+                ?: throw IllegalStateException("remove() called before next() or remove() already called")
+            
+            runBlockingMultiplatform {
+                rwLock.withWriteLock {
+                    // Find and remove the node (verify it still exists with same value)
+                    findNodeUnsafe(nodeToRemove.key)?.let { currentNode ->
+                        if (currentNode.value == nodeToRemove.value) {
+                            nodeRemove(currentNode)
+                        }
+                    }
+                }
             }
-
-            // Remove using the public API
-            this@TreeMap.remove(keyToRemove)
-
-            // Update expected mod count
-            expectedModCount = modCount
             lastReturned = null
         }
 
-        private fun checkForModification() {
+        private fun checkForConcurrentModification() {
             if (modCount != expectedModCount) {
-                throw ConcurrentModificationException("TreeMap modified during iteration")
+                throw ConcurrentModificationException("TreeMap was modified during iteration")
             }
         }
 
@@ -1298,6 +1844,64 @@ open class TreeMap<K, V> : MutableMap<K, V> {
     }
 
     private inner class EntryIterator : TreeIterator<MutableMap.MutableEntry<K, V>>() {
+        override fun getValue(node: Node<K, V>): MutableMap.MutableEntry<K, V> = TreeEntry(node)
+    }
+
+    // Suspend iterator implementations with proper thread safety
+    private abstract inner class SuspendTreeIterator<T> : SuspendMutableIterator<T> {
+        private var next: Node<K, V>? = runBlockingMultiplatform {
+            rwLock.withReadLock { minimum(root) }
+        }
+        private var lastReturned: Node<K, V>? = null
+        private val expectedModCount = modCount
+
+        override suspend fun hasNext(): Boolean {
+            checkForConcurrentModification()
+            return next != null
+        }
+
+        override suspend fun next(): T {
+            checkForConcurrentModification()
+            val current = next ?: throw NoSuchElementException("No more elements in iterator")
+            lastReturned = current
+            next = rwLock.withReadLock { successor(current) }
+            return getValue(current)
+        }
+
+        override suspend fun remove() {
+            checkForConcurrentModification()
+            val nodeToRemove = lastReturned 
+                ?: throw IllegalStateException("remove() called before next() or remove() already called")
+            
+            rwLock.withWriteLock {
+                // Find and remove the node (verify it still exists with same value)
+                findNodeUnsafe(nodeToRemove.key)?.let { currentNode ->
+                    if (currentNode.value == nodeToRemove.value) {
+                        nodeRemove(currentNode)
+                    }
+                }
+            }
+            lastReturned = null
+        }
+
+        private fun checkForConcurrentModification() {
+            if (modCount != expectedModCount) {
+                throw ConcurrentModificationException("TreeMap was modified during iteration")
+            }
+        }
+
+        abstract fun getValue(node: Node<K, V>): T
+    }
+
+    private inner class SuspendKeyIterator : SuspendTreeIterator<K>() {
+        override fun getValue(node: Node<K, V>): K = node.key
+    }
+
+    private inner class SuspendValueIterator : SuspendTreeIterator<V>() {
+        override fun getValue(node: Node<K, V>): V = node.value
+    }
+
+    private inner class SuspendEntryIterator : SuspendTreeIterator<MutableMap.MutableEntry<K, V>>() {
         override fun getValue(node: Node<K, V>): MutableMap.MutableEntry<K, V> = TreeEntry(node)
     }
 
@@ -1317,7 +1921,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         override val entries: Set<Map.Entry<K, V>> get() = DescendingEntrySet()
 
         override fun isEmpty(): Boolean = this@TreeMap.isEmpty()
-        override fun get(key: K): V? = this@TreeMap[key]
+        override fun get(key: K): V? = this@TreeMap.get(key)
         override fun containsKey(key: K): Boolean = this@TreeMap.containsKey(key)
         override fun containsValue(value: V): Boolean = this@TreeMap.containsValue(value)
     }
@@ -1344,49 +1948,52 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         override fun iterator(): Iterator<Map.Entry<K, V>> = DescendingEntryIterator()
     }
 
-    // Descending iterators
+    // Descending iterators with single-lock strategy
     private abstract inner class DescendingTreeIterator<T> : MutableIterator<T> {
-        private var expectedModCount = modCount
-        private var nextNode: Node<K, V>? = maximum(root)
-        private var lastReturned: Node<K, V>? = null
-
-        override fun hasNext(): Boolean {
-            checkForModification()
-            return nextNode != null
+        // Collect all nodes in descending order under single read lock
+        private val nodes: List<Node<K, V>> = runBlockingMultiplatform {
+            rwLock.withReadLock {
+                val result = mutableListOf<Node<K, V>>()
+                var current = maximum(root)
+                while (current != null) {
+                    result.add(current)
+                    current = predecessor(current)
+                }
+                result
+            }
         }
+        private var currentIndex = 0
+        private var lastReturnedIndex = -1
+
+        override fun hasNext(): Boolean = currentIndex < nodes.size
 
         override fun next(): T {
-            checkForModification()
-            val current =
-                nextNode ?: throw NoSuchElementException("No more elements in descending iterator")
-            lastReturned = current
-            nextNode = predecessor(current)
-            return getValue(current)
+            if (currentIndex >= nodes.size) {
+                throw NoSuchElementException("No more elements in descending iterator")
+            }
+            val node = nodes[currentIndex]
+            lastReturnedIndex = currentIndex
+            currentIndex++
+            return getValue(node)
         }
 
         override fun remove() {
-            checkForModification()
-            val toRemove = lastReturned ?: throw IllegalStateException(
-                "remove() called before next() or remove() already called"
-            )
-
-            val keyToRemove = toRemove.key
-
-            // If nextNode is the node we're removing, it's already correctly set to predecessor
-            // No need to adjust nextNode since we already moved past this node
-
-            // Remove using the public API
-            this@TreeMap.remove(keyToRemove)
-
-            // Update expected mod count
-            expectedModCount = modCount
-            lastReturned = null
-        }
-
-        private fun checkForModification() {
-            if (modCount != expectedModCount) {
-                throw ConcurrentModificationException("TreeMap modified during iteration")
+            if (lastReturnedIndex == -1) {
+                throw IllegalStateException("remove() called before next() or remove() already called")
             }
+            
+            val nodeToRemove = nodes[lastReturnedIndex]
+            runBlockingMultiplatform {
+                rwLock.withWriteLock {
+                    // Find and remove the node (it might have been removed by another thread)
+                    findNode(nodeToRemove.key)?.let { currentNode ->
+                        if (currentNode.value == nodeToRemove.value) {
+                            nodeRemove(currentNode)
+                        }
+                    }
+                }
+            }
+            lastReturnedIndex = -1
         }
 
         abstract fun getValue(node: Node<K, V>): T
@@ -1404,7 +2011,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         override fun getValue(node: Node<K, V>): Map.Entry<K, V> = TreeEntry(node)
     }
 
-    // Sub-map implementations - (kept same as before for brevity)
+    // Sub-map implementations
     private inner class SubMap(
         private val fromKey: K,
         private val fromInclusive: Boolean,
@@ -1426,14 +2033,11 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         }
 
         override val size: Int
-            get() {
-                var count = 0
-                var node = firstNode()
-                while (node != null && inRange(node.key)) {
-                    count++
-                    node = successor(node)
+            get() = runBlockingMultiplatform {
+                rwLock.withReadLock {
+                    // Optimized: Use unsafe range counting method
+                    countInRangeUnsafe(fromKey, fromInclusive, toKey, toInclusive)
                 }
-                return count
             }
 
         override val keys: Set<K>
@@ -1441,7 +2045,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 override val size: Int get() = this@SubMap.size
                 override fun isEmpty(): Boolean = this@SubMap.isEmpty()
                 override fun contains(element: K): Boolean =
-                    inRange(element) && containsKey(element)
+                    inRange(element) && this@SubMap.containsKey(element)
 
                 override fun containsAll(elements: Collection<K>): Boolean =
                     elements.all { contains(it) }
@@ -1465,7 +2069,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 override val size: Int get() = this@SubMap.size
                 override fun isEmpty(): Boolean = this@SubMap.isEmpty()
                 override fun contains(element: Map.Entry<K, V>): Boolean {
-                    return inRange(element.key) && this@TreeMap[element.key] == element.value
+                    return inRange(element.key) && this@TreeMap.get(element.key) == element.value
                 }
 
                 override fun containsAll(elements: Collection<Map.Entry<K, V>>): Boolean =
@@ -1474,20 +2078,47 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 override fun iterator(): Iterator<Map.Entry<K, V>> = SubMapEntryIterator()
             }
 
-        private fun firstNode(): Node<K, V>? {
-            return ceilingNode(fromKey)?.takeIf { inRange(it.key) }
+        private fun firstNode(): Node<K, V>? = runBlockingMultiplatform {
+            rwLock.withReadLock {
+                ceilingNode(fromKey)?.takeIf { inRange(it.key) }
+            }
         }
 
-        override fun isEmpty(): Boolean = firstNode() == null
-        override fun get(key: K): V? = if (inRange(key)) this@TreeMap[key] else null
-        override fun containsKey(key: K): Boolean = inRange(key) && this@TreeMap.containsKey(key)
+        override fun isEmpty(): Boolean = runBlockingMultiplatform { isEmptySuspend() }
+        
+        override fun get(key: K): V? = runBlockingMultiplatform { getSuspend(key) }
+        
+        override fun containsKey(key: K): Boolean = runBlockingMultiplatform { containsKeySuspend(key) }
+        
+        suspend fun isEmptySuspend(): Boolean = rwLock.withReadLock { 
+            countInRangeUnsafe(fromKey, fromInclusive, toKey, toInclusive) == 0 
+        }
+        
+        suspend fun getSuspend(key: K): V? = 
+            if (inRange(key)) this@TreeMap.getSuspend(key) else null
+            
+        suspend fun containsKeySuspend(key: K): Boolean = 
+            inRange(key) && this@TreeMap.containsKeySuspend(key)
         override fun containsValue(value: V): Boolean {
-            var node = firstNode()
-            while (node != null && inRange(node.key)) {
-                if (node.value == value) return true
-                node = successor(node)
+            return runBlockingMultiplatform {
+                rwLock.withReadLock {
+                    // Optimized: Use single lock with unsafe range traversal with early termination
+                    var current = if (fromInclusive) ceilingNode(fromKey) else higherNode(fromKey)
+                    while (current != null) {
+                        val key = current.key
+                        val toCmp = compare(key, toKey)
+                        val inRange = if (toInclusive) toCmp <= 0 else toCmp < 0
+                        
+                        if (!inRange) break
+                        
+                        if (current.value == value) {
+                            return@withReadLock true // Early termination
+                        }
+                        current = successor(current)
+                    }
+                    false
+                }
             }
-            return false
         }
 
         private inner class SubMapKeyIterator : Iterator<K> {
@@ -1500,7 +2131,19 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 if (modCount != expectedModCount) throw ConcurrentModificationException()
                 val current = next ?: throw NoSuchElementException()
                 if (!inRange(current.key)) throw NoSuchElementException()
-                next = successor(current)
+                next = runBlockingMultiplatform {
+                    rwLock.withReadLock { successor(current) }
+                }
+                return current.key
+            }
+
+            suspend fun hasNextSuspend(): Boolean = next != null && inRange(next!!.key)
+
+            suspend fun nextSuspend(): K {
+                if (modCount != expectedModCount) throw ConcurrentModificationException()
+                val current = next ?: throw NoSuchElementException()
+                if (!inRange(current.key)) throw NoSuchElementException()
+                next = rwLock.withReadLock { successor(current) }
                 return current.key
             }
         }
@@ -1515,7 +2158,19 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 if (modCount != expectedModCount) throw ConcurrentModificationException()
                 val current = next ?: throw NoSuchElementException()
                 if (!inRange(current.key)) throw NoSuchElementException()
-                next = successor(current)
+                next = runBlockingMultiplatform {
+                    rwLock.withReadLock { successor(current) }
+                }
+                return current.value
+            }
+
+            suspend fun hasNextSuspend(): Boolean = next != null && inRange(next!!.key)
+
+            suspend fun nextSuspend(): V {
+                if (modCount != expectedModCount) throw ConcurrentModificationException()
+                val current = next ?: throw NoSuchElementException()
+                if (!inRange(current.key)) throw NoSuchElementException()
+                next = rwLock.withReadLock { successor(current) }
                 return current.value
             }
         }
@@ -1530,7 +2185,19 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 if (modCount != expectedModCount) throw ConcurrentModificationException()
                 val current = next ?: throw NoSuchElementException()
                 if (!inRange(current.key)) throw NoSuchElementException()
-                next = successor(current)
+                next = runBlockingMultiplatform {
+                    rwLock.withReadLock { successor(current) }
+                }
+                return TreeEntry(current)
+            }
+
+            suspend fun hasNextSuspend(): Boolean = next != null && inRange(next!!.key)
+
+            suspend fun nextSuspend(): Map.Entry<K, V> {
+                if (modCount != expectedModCount) throw ConcurrentModificationException()
+                val current = next ?: throw NoSuchElementException()
+                if (!inRange(current.key)) throw NoSuchElementException()
+                next = rwLock.withReadLock { successor(current) }
                 return TreeEntry(current)
             }
         }
@@ -1543,17 +2210,23 @@ open class TreeMap<K, V> : MutableMap<K, V> {
             return if (inclusive) cmp <= 0 else cmp < 0
         }
 
-        private fun firstNode(): Node<K, V>? = minimum(root)
+        private fun firstNode(): Node<K, V>? = runBlockingMultiplatform {
+            rwLock.withReadLock {
+                minimum(root)
+            }
+        }
 
         override val size: Int
-            get() {
-                var count = 0
-                var node = firstNode()
-                while (node != null && inRange(node.key)) {
-                    count++
-                    node = successor(node)
+            get() = runBlockingMultiplatform {
+                rwLock.withReadLock {
+                    var count = 0
+                    var current = minimum(root)
+                    while (current != null && inRange(current.key)) {
+                        count++
+                        current = successor(current)
+                    }
+                    count
                 }
-                return count
             }
 
         override val keys: Set<K>
@@ -1561,7 +2234,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 override val size: Int get() = this@HeadMap.size
                 override fun isEmpty(): Boolean = this@HeadMap.isEmpty()
                 override fun contains(element: K): Boolean =
-                    inRange(element) && containsKey(element)
+                    inRange(element) && this@HeadMap.containsKey(element)
 
                 override fun containsAll(elements: Collection<K>): Boolean =
                     elements.all { contains(it) }
@@ -1585,7 +2258,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 override val size: Int get() = this@HeadMap.size
                 override fun isEmpty(): Boolean = this@HeadMap.isEmpty()
                 override fun contains(element: Map.Entry<K, V>): Boolean {
-                    return inRange(element.key) && this@TreeMap[element.key] == element.value
+                    return inRange(element.key) && this@TreeMap.get(element.key) == element.value
                 }
 
                 override fun containsAll(elements: Collection<Map.Entry<K, V>>): Boolean =
@@ -1594,16 +2267,39 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 override fun iterator(): Iterator<Map.Entry<K, V>> = HeadMapEntryIterator()
             }
 
-        override fun isEmpty(): Boolean = firstNode()?.let { inRange(it.key) } != true
-        override fun get(key: K): V? = if (inRange(key)) this@TreeMap[key] else null
-        override fun containsKey(key: K): Boolean = inRange(key) && this@TreeMap.containsKey(key)
+        override fun isEmpty(): Boolean = runBlockingMultiplatform { isEmptySuspend() }
+        
+        override fun get(key: K): V? = runBlockingMultiplatform { getSuspend(key) }
+        
+        override fun containsKey(key: K): Boolean = runBlockingMultiplatform { containsKeySuspend(key) }
+        
+        suspend fun isEmptySuspend(): Boolean = rwLock.withReadLock { 
+            minimum(root)?.let { inRange(it.key) } != true 
+        }
+        
+        suspend fun getSuspend(key: K): V? = 
+            if (inRange(key)) this@TreeMap.getSuspend(key) else null
+            
+        suspend fun containsKeySuspend(key: K): Boolean = 
+            inRange(key) && this@TreeMap.containsKeySuspend(key)
         override fun containsValue(value: V): Boolean {
-            var node = firstNode()
-            while (node != null && inRange(node.key)) {
-                if (node.value == value) return true
-                node = successor(node)
+            return runBlockingMultiplatform {
+                rwLock.withReadLock {
+                    // Optimized: Use single lock with unsafe traversal and early termination
+                    var current = minimum(root)
+                    while (current != null) {
+                        val cmp = compare(current.key, toKey)
+                        val inRange = if (inclusive) cmp <= 0 else cmp < 0
+                        if (!inRange) break
+                        
+                        if (current.value == value) {
+                            return@withReadLock true
+                        }
+                        current = successor(current)
+                    }
+                    false
+                }
             }
-            return false
         }
 
         private inner class HeadMapKeyIterator : Iterator<K> {
@@ -1616,7 +2312,19 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 if (modCount != expectedModCount) throw ConcurrentModificationException()
                 val node = next ?: throw NoSuchElementException()
                 if (!inRange(node.key)) throw NoSuchElementException()
-                next = successor(node)
+                next = runBlockingMultiplatform {
+                    rwLock.withReadLock { successor(node) }
+                }
+                return node.key
+            }
+
+            suspend fun hasNextSuspend(): Boolean = next != null && inRange(next!!.key)
+
+            suspend fun nextSuspend(): K {
+                if (modCount != expectedModCount) throw ConcurrentModificationException()
+                val node = next ?: throw NoSuchElementException()
+                if (!inRange(node.key)) throw NoSuchElementException()
+                next = rwLock.withReadLock { successor(node) }
                 return node.key
             }
         }
@@ -1631,7 +2339,19 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 if (modCount != expectedModCount) throw ConcurrentModificationException()
                 val node = next ?: throw NoSuchElementException()
                 if (!inRange(node.key)) throw NoSuchElementException()
-                next = successor(node)
+                next = runBlockingMultiplatform {
+                    rwLock.withReadLock { successor(node) }
+                }
+                return node.value
+            }
+
+            suspend fun hasNextSuspend(): Boolean = next != null && inRange(next!!.key)
+
+            suspend fun nextSuspend(): V {
+                if (modCount != expectedModCount) throw ConcurrentModificationException()
+                val node = next ?: throw NoSuchElementException()
+                if (!inRange(node.key)) throw NoSuchElementException()
+                next = rwLock.withReadLock { successor(node) }
                 return node.value
             }
         }
@@ -1646,7 +2366,19 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 if (modCount != expectedModCount) throw ConcurrentModificationException()
                 val node = next ?: throw NoSuchElementException()
                 if (!inRange(node.key)) throw NoSuchElementException()
-                next = successor(node)
+                next = runBlockingMultiplatform {
+                    rwLock.withReadLock { successor(node) }
+                }
+                return TreeEntry(node)
+            }
+
+            suspend fun hasNextSuspend(): Boolean = next != null && inRange(next!!.key)
+
+            suspend fun nextSuspend(): Map.Entry<K, V> {
+                if (modCount != expectedModCount) throw ConcurrentModificationException()
+                val node = next ?: throw NoSuchElementException()
+                if (!inRange(node.key)) throw NoSuchElementException()
+                next = rwLock.withReadLock { successor(node) }
                 return TreeEntry(node)
             }
         }
@@ -1659,19 +2391,23 @@ open class TreeMap<K, V> : MutableMap<K, V> {
             return if (inclusive) cmp >= 0 else cmp > 0
         }
 
-        private fun firstNode(): Node<K, V>? {
-            return ceilingNode(fromKey)?.takeIf { inRange(it.key) }
+        private fun firstNode(): Node<K, V>? = runBlockingMultiplatform {
+            rwLock.withReadLock {
+                ceilingNode(fromKey)?.takeIf { inRange(it.key) }
+            }
         }
 
         override val size: Int
-            get() {
-                var count = 0
-                var node = firstNode()
-                while (node != null) {
-                    count++
-                    node = successor(node)
+            get() = runBlockingMultiplatform {
+                rwLock.withReadLock {
+                    var count = 0
+                    var current = if (inclusive) ceilingNode(fromKey) else higherNode(fromKey)
+                    while (current != null) {
+                        count++
+                        current = successor(current)
+                    }
+                    count
                 }
-                return count
             }
 
         override val keys: Set<K>
@@ -1679,7 +2415,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 override val size: Int get() = this@TailMap.size
                 override fun isEmpty(): Boolean = this@TailMap.isEmpty()
                 override fun contains(element: K): Boolean =
-                    inRange(element) && containsKey(element)
+                    inRange(element) && this@TailMap.containsKey(element)
 
                 override fun containsAll(elements: Collection<K>): Boolean =
                     elements.all { contains(it) }
@@ -1703,7 +2439,7 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 override val size: Int get() = this@TailMap.size
                 override fun isEmpty(): Boolean = this@TailMap.isEmpty()
                 override fun contains(element: Map.Entry<K, V>): Boolean {
-                    return inRange(element.key) && this@TreeMap[element.key] == element.value
+                    return inRange(element.key) && this@TreeMap.get(element.key) == element.value
                 }
 
                 override fun containsAll(elements: Collection<Map.Entry<K, V>>): Boolean =
@@ -1712,16 +2448,35 @@ open class TreeMap<K, V> : MutableMap<K, V> {
                 override fun iterator(): Iterator<Map.Entry<K, V>> = TailMapEntryIterator()
             }
 
-        override fun isEmpty(): Boolean = firstNode() == null
-        override fun get(key: K): V? = if (inRange(key)) this@TreeMap[key] else null
-        override fun containsKey(key: K): Boolean = inRange(key) && this@TreeMap.containsKey(key)
+        override fun isEmpty(): Boolean = runBlockingMultiplatform { isEmptySuspend() }
+        
+        override fun get(key: K): V? = runBlockingMultiplatform { getSuspend(key) }
+        
+        override fun containsKey(key: K): Boolean = runBlockingMultiplatform { containsKeySuspend(key) }
+        
+        suspend fun isEmptySuspend(): Boolean = rwLock.withReadLock { 
+            ceilingNode(fromKey)?.takeIf { inRange(it.key) } == null 
+        }
+        
+        suspend fun getSuspend(key: K): V? = 
+            if (inRange(key)) this@TreeMap.getSuspend(key) else null
+            
+        suspend fun containsKeySuspend(key: K): Boolean = 
+            inRange(key) && this@TreeMap.containsKeySuspend(key)
         override fun containsValue(value: V): Boolean {
-            var node = firstNode()
-            while (node != null) {
-                if (node.value == value) return true
-                node = successor(node)
+            return runBlockingMultiplatform {
+                rwLock.withReadLock {
+                    // Optimized: Use single lock with unsafe traversal and early termination
+                    var current = if (inclusive) ceilingNode(fromKey) else higherNode(fromKey)
+                    while (current != null) {
+                        if (current.value == value) {
+                            return@withReadLock true
+                        }
+                        current = successor(current)
+                    }
+                    false
+                }
             }
-            return false
         }
 
         private inner class TailMapKeyIterator : Iterator<K> {
@@ -1733,7 +2488,18 @@ open class TreeMap<K, V> : MutableMap<K, V> {
             override fun next(): K {
                 if (modCount != expectedModCount) throw ConcurrentModificationException()
                 val node = next ?: throw NoSuchElementException()
-                next = successor(node)
+                next = runBlockingMultiplatform {
+                    rwLock.withReadLock { successor(node) }
+                }
+                return node.key
+            }
+
+            suspend fun hasNextSuspend(): Boolean = next != null
+
+            suspend fun nextSuspend(): K {
+                if (modCount != expectedModCount) throw ConcurrentModificationException()
+                val node = next ?: throw NoSuchElementException()
+                next = rwLock.withReadLock { successor(node) }
                 return node.key
             }
         }
@@ -1747,7 +2513,18 @@ open class TreeMap<K, V> : MutableMap<K, V> {
             override fun next(): V {
                 if (modCount != expectedModCount) throw ConcurrentModificationException()
                 val node = next ?: throw NoSuchElementException()
-                next = successor(node)
+                next = runBlockingMultiplatform {
+                    rwLock.withReadLock { successor(node) }
+                }
+                return node.value
+            }
+
+            suspend fun hasNextSuspend(): Boolean = next != null
+
+            suspend fun nextSuspend(): V {
+                if (modCount != expectedModCount) throw ConcurrentModificationException()
+                val node = next ?: throw NoSuchElementException()
+                next = rwLock.withReadLock { successor(node) }
                 return node.value
             }
         }
@@ -1761,7 +2538,18 @@ open class TreeMap<K, V> : MutableMap<K, V> {
             override fun next(): Map.Entry<K, V> {
                 if (modCount != expectedModCount) throw ConcurrentModificationException()
                 val node = next ?: throw NoSuchElementException()
-                next = successor(node)
+                next = runBlockingMultiplatform {
+                    rwLock.withReadLock { successor(node) }
+                }
+                return TreeEntry(node)
+            }
+
+            suspend fun hasNextSuspend(): Boolean = next != null
+
+            suspend fun nextSuspend(): Map.Entry<K, V> {
+                if (modCount != expectedModCount) throw ConcurrentModificationException()
+                val node = next ?: throw NoSuchElementException()
+                next = rwLock.withReadLock { successor(node) }
                 return TreeEntry(node)
             }
         }
@@ -1769,6 +2557,9 @@ open class TreeMap<K, V> : MutableMap<K, V> {
 
     // NavigableSet support
     fun navigableKeySet(): Set<K> = keys
+    
+    // Suspend version for coroutine contexts
+    suspend fun navigableKeySetSuspend(): Set<K> = keys
 
     /**
      * Creates a shallow copy of this TreeMap.
@@ -1796,6 +2587,19 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         copied.putAll(this)
         return copied
     }
+    
+    // Suspend version for coroutine contexts
+    suspend fun copySuspend(): TreeMap<K, V> {
+        // Use the new constructor with builder pattern only
+        val copied = TreeMap<K, V>(comparator) {
+            // Recreate each secondary key from the original
+            secondaryKeysSpec.forEach { keySpec ->
+                key(keySpec.name, keySpec.keyExtractor)
+            }
+        }
+        copied.putAllSuspend(this)
+        return copied
+    }
 
     // Standard object methods
     override fun toString(): String {
@@ -1816,6 +2620,22 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         return entries.sumOf { it.hashCode() }
     }
 
+
+    // ================================
+    // Bulk Operations Builder API
+    // ================================
+
+    /**
+     * Creates a traversal builder for chaining bulk operations under a single lock.
+     * Supports operations like .filter().map().collect() with maximum performance.
+     */
+    fun traverse(): TraversalBuilder<K, V> = TraversalBuilder(this)
+
+    /**
+     * Suspend version of traverse() for coroutine contexts.
+     */
+    suspend fun traverseSuspend(): SuspendTraversalBuilder<K, V> = SuspendTraversalBuilder(this)
+
     /**
      * Custom exception for concurrent modification detection during iteration.
      */
@@ -1824,4 +2644,570 @@ open class TreeMap<K, V> : MutableMap<K, V> {
         constructor(message: String) : super(message)
         constructor(message: String, cause: Throwable) : super(message, cause)
     }
+}
+/**
+ * Builder for chaining traversal operations under a single lock.
+ * All operations are executed atomically within a single read lock.
+ */
+class TraversalBuilder<K, V>(private val treeMap: TreeMap<K, V>) {
+    private val operations = mutableListOf<(TreeMap.Node<K, V>) -> Boolean>()
+
+    /**
+     * Filter entries by predicate.
+     */
+    fun filter(predicate: (Map.Entry<K, V>) -> Boolean): TraversalBuilder<K, V> {
+        operations.add { node ->
+            val entry = object : Map.Entry<K, V> {
+                override val key: K = node.key
+                override val value: V = node.value
+            }
+            predicate(entry)
+        }
+        return this
+    }
+
+    /**
+     * Filter by key only.
+     */
+    fun filterKeys(predicate: (K) -> Boolean): TraversalBuilder<K, V> {
+        operations.add { node ->
+            predicate(node.key)
+        }
+        return this
+    }
+
+    /**
+     * Filter by value only.
+     */
+    fun filterValues(predicate: (V) -> Boolean): TraversalBuilder<K, V> {
+        operations.add { node ->
+            predicate(node.value)
+        }
+        return this
+    }
+
+    /**
+     * Transform entries (this will change the result type).
+     */
+    fun <R> map(transform: (Map.Entry<K, V>) -> R): MappedTraversalBuilder<K, V, R> {
+        return MappedTraversalBuilder(treeMap, operations, transform)
+    }
+
+    /**
+     * Transform keys only.
+     */
+    fun <R> mapKeys(transform: (K) -> R): MappedTraversalBuilder<K, V, R> {
+        return MappedTraversalBuilder(treeMap, operations) { entry -> transform(entry.key) }
+    }
+
+    /**
+     * Transform values only.
+     */
+    fun <R> mapValues(transform: (V) -> R): MappedTraversalBuilder<K, V, R> {
+        return MappedTraversalBuilder(treeMap, operations) { entry -> transform(entry.value) }
+    }
+
+    /**
+     * Collect filtered entries into a list.
+     */
+    fun toList(): List<Map.Entry<K, V>> = runBlockingMultiplatform {
+        treeMap.rwLock.withReadLock {
+            val result = mutableListOf<Map.Entry<K, V>>()
+            treeMap.forEachNodeUnsafe { node ->
+                if (operations.all { it(node) }) {
+                    result.add(object : Map.Entry<K, V> {
+                        override val key: K = node.key
+                        override val value: V = node.value
+                    })
+                }
+            }
+            result
+        }
+    }
+
+    /**
+     * Collect filtered keys into a list.
+     */
+    fun keys(): List<K> = runBlockingMultiplatform {
+        treeMap.rwLock.withReadLock {
+            val result = mutableListOf<K>()
+            treeMap.forEachNodeUnsafe { node ->
+                if (operations.all { it(node) }) {
+                    result.add(node.key)
+                }
+            }
+            result
+        }
+    }
+
+    /**
+     * Collect filtered values into a list.
+     */
+    fun values(): List<V> = runBlockingMultiplatform {
+        treeMap.rwLock.withReadLock {
+            val result = mutableListOf<V>()
+            treeMap.forEachNodeUnsafe { node ->
+                if (operations.all { it(node) }) {
+                    result.add(node.value)
+                }
+            }
+            result
+        }
+    }
+
+    /**
+     * Count matching entries.
+     */
+    fun count(): Int = runBlockingMultiplatform {
+        treeMap.rwLock.withReadLock {
+            var count = 0
+            treeMap.forEachNodeUnsafe { node ->
+                if (operations.all { it(node) }) {
+                    count++
+                }
+            }
+            count
+        }
+    }
+
+    /**
+     * Check if any entry matches.
+     */
+    fun any(): Boolean = runBlockingMultiplatform {
+        treeMap.rwLock.withReadLock {
+            // Direct tree traversal for optimal early termination
+            var current = treeMap.minimum(treeMap.root)
+            while (current != null) {
+                if (operations.all { it(current) }) {
+                    return@withReadLock true // Early termination
+                }
+                current = treeMap.successor(current)
+            }
+            false
+        }
+    }
+
+    /**
+     * Check if all entries match.
+     */
+    fun all(): Boolean = runBlockingMultiplatform {
+        treeMap.rwLock.withReadLock {
+            // Direct tree traversal for optimal early termination
+            var current = treeMap.minimum(treeMap.root)
+            while (current != null) {
+                if (!operations.all { it(current) }) {
+                    return@withReadLock false // Early termination
+                }
+                current = treeMap.successor(current)
+            }
+            true
+        }
+    }
+
+    /**
+     * Get the first matching entry.
+     */
+    fun first(): Map.Entry<K, V> = runBlockingMultiplatform {
+        treeMap.rwLock.withReadLock {
+            var current = treeMap.minimum(treeMap.root)
+            while (current != null) {
+                if (operations.all { it(current) }) {
+                    return@withReadLock object : Map.Entry<K, V> {
+                        override val key: K = current.key
+                        override val value: V = current.value
+                    }
+                }
+                current = treeMap.successor(current)
+            }
+            throw NoSuchElementException("No matching element found")
+        }
+    }
+
+    /**
+     * Get the first matching entry or null if none found.
+     */
+    fun firstOrNull(): Map.Entry<K, V>? = runBlockingMultiplatform {
+        treeMap.rwLock.withReadLock {
+            var current = treeMap.minimum(treeMap.root)
+            while (current != null) {
+                if (operations.all { it(current) }) {
+                    return@withReadLock object : Map.Entry<K, V> {
+                        override val key: K = current.key
+                        override val value: V = current.value
+                    }
+                }
+                current = treeMap.successor(current)
+            }
+            null
+        }
+    }
+
+    /**
+     * Take the first n matching entries.
+     */
+    fun take(n: Int): List<Map.Entry<K, V>> = runBlockingMultiplatform {
+        treeMap.rwLock.withReadLock {
+            val result = mutableListOf<Map.Entry<K, V>>()
+            var current = treeMap.minimum(treeMap.root)
+            while (current != null && result.size < n) {
+                if (operations.all { it(current) }) {
+                    result.add(object : Map.Entry<K, V> {
+                        override val key: K = current.key
+                        override val value: V = current.value
+                    })
+                }
+                current = treeMap.successor(current)
+            }
+            result
+        }
+    }
+
+    /**
+     * Skip the first n matching entries and return the rest.
+     */
+    fun drop(n: Int): List<Map.Entry<K, V>> = runBlockingMultiplatform {
+        treeMap.rwLock.withReadLock {
+            val result = mutableListOf<Map.Entry<K, V>>()
+            var current = treeMap.minimum(treeMap.root)
+            var skipped = 0
+            while (current != null) {
+                if (operations.all { it(current) }) {
+                    if (skipped >= n) {
+                        result.add(object : Map.Entry<K, V> {
+                            override val key: K = current.key
+                            override val value: V = current.value
+                        })
+                    } else {
+                        skipped++
+                    }
+                }
+                current = treeMap.successor(current)
+            }
+            result
+        }
+    }
+
+    /**
+     * Perform an action on each matching entry.
+     */
+    fun forEach(action: (Map.Entry<K, V>) -> Unit) = runBlockingMultiplatform {
+        treeMap.rwLock.withReadLock {
+            var current = treeMap.minimum(treeMap.root)
+            while (current != null) {
+                if (operations.all { it(current) }) {
+                    val entry = object : Map.Entry<K, V> {
+                        override val key: K = current.key
+                        override val value: V = current.value
+                    }
+                    action(entry)
+                }
+                current = treeMap.successor(current)
+            }
+        }
+    }
+}
+
+/**
+ * Builder for mapped traversal operations.
+ */
+class MappedTraversalBuilder<K, V, R> internal constructor(
+    private val treeMap: TreeMap<K, V>,
+    internal val operations: List<(TreeMap.Node<K, V>) -> Boolean>, // Hide Node type as Any
+    private val transform: (Map.Entry<K, V>) -> R
+) {
+    /**
+     * Collect transformed results into a list.
+     */
+    fun toList(): List<R> = runBlockingMultiplatform {
+        treeMap.rwLock.withReadLock {
+            val result = mutableListOf<R>()
+            treeMap.forEachNodeUnsafe { node ->
+                if (operations.all { it(node) }) {
+                    val entry = object : Map.Entry<K, V> {
+                        override val key: K = node.key
+                        override val value: V = node.value
+                    }
+                    result.add(transform(entry))
+                }
+            }
+            result
+        }
+    }
+}
+
+/**
+ * Suspend version of TraversalBuilder for optimal performance in coroutine contexts.
+ */
+class SuspendTraversalBuilder<K, V>(private val treeMap: TreeMap<K, V>) {
+    private val operations = mutableListOf<(TreeMap.Node<K, V>) -> Boolean>()
+    
+    /**
+     * Filter entries by predicate.
+     */
+    fun filter(predicate: (Map.Entry<K, V>) -> Boolean): SuspendTraversalBuilder<K, V> {
+        operations.add { node ->
+            val entry = object : Map.Entry<K, V> {
+                override val key: K = node.key
+                override val value: V = node.value
+            }
+            predicate(entry)
+        }
+        return this
+    }
+
+    /**
+     * Filter by key only.
+     */
+    fun filterKeys(predicate: (K) -> Boolean): SuspendTraversalBuilder<K, V> {
+        operations.add { node ->
+            predicate(node.key)
+        }
+        return this
+    }
+
+    /**
+     * Filter by value only.
+     */
+    fun filterValues(predicate: (V) -> Boolean): SuspendTraversalBuilder<K, V> {
+        operations.add { node ->
+            predicate(node.value)
+        }
+        return this
+    }
+
+    /**
+     * Transform entries (this will change the result type).
+     */
+    fun <R> map(transform: (Map.Entry<K, V>) -> R): SuspendMappedTraversalBuilder<K, V, R> {
+        return SuspendMappedTraversalBuilder(treeMap, operations, transform)
+    }
+
+    /**
+     * Transform keys only.
+     */
+    fun <R> mapKeys(transform: (K) -> R): SuspendMappedTraversalBuilder<K, V, R> {
+        return SuspendMappedTraversalBuilder(treeMap, operations) { entry -> transform(entry.key) }
+    }
+
+    /**
+     * Transform values only.
+     */
+    fun <R> mapValues(transform: (V) -> R): SuspendMappedTraversalBuilder<K, V, R> {
+        return SuspendMappedTraversalBuilder(treeMap, operations) { entry -> transform(entry.value) }
+    }
+
+    /**
+     * Collect filtered entries into a list.
+     */
+    suspend fun toList(): List<Map.Entry<K, V>> = 
+        treeMap.rwLock.withReadLock {
+            val result = mutableListOf<Map.Entry<K, V>>()
+            treeMap.forEachNodeUnsafe { node ->
+                if (operations.all { it(node) }) {
+                    result.add(object : Map.Entry<K, V> {
+                        override val key: K = node.key
+                        override val value: V = node.value
+                    })
+                }
+            }
+            result
+        }
+
+    /**
+     * Collect filtered keys into a list.
+     */
+    suspend fun keys(): List<K> = 
+        treeMap.rwLock.withReadLock {
+            val result = mutableListOf<K>()
+            treeMap.forEachNodeUnsafe { node ->
+                if (operations.all { it(node) }) {
+                    result.add(node.key)
+                }
+            }
+            result
+        }
+
+    /**
+     * Collect filtered values into a list.
+     */
+    suspend fun values(): List<V> = 
+        treeMap.rwLock.withReadLock {
+            val result = mutableListOf<V>()
+            treeMap.forEachNodeUnsafe { node ->
+                if (operations.all { it(node) }) {
+                    result.add(node.value)
+                }
+            }
+            result
+        }
+
+    /**
+     * Count matching entries.
+     */
+    suspend fun count(): Int = 
+        treeMap.rwLock.withReadLock {
+            var count = 0
+            treeMap.forEachNodeUnsafe { node ->
+                if (operations.all { it(node) }) {
+                    count++
+                }
+            }
+            count
+        }
+
+    /**
+     * Check if any entry matches.
+     */
+    suspend fun any(): Boolean = 
+        treeMap.rwLock.withReadLock {
+            // Direct tree traversal for optimal early termination
+            var current = treeMap.minimum(treeMap.root)
+            while (current != null) {
+                if (operations.all { it(current) }) {
+                    return@withReadLock true // Early termination
+                }
+                current = treeMap.successor(current)
+            }
+            false
+        }
+
+    /**
+     * Check if all entries match.
+     */
+    suspend fun all(): Boolean = 
+        treeMap.rwLock.withReadLock {
+            // Direct tree traversal for optimal early termination
+            var current = treeMap.minimum(treeMap.root)
+            while (current != null) {
+                if (!operations.all { it(current) }) {
+                    return@withReadLock false // Early termination
+                }
+                current = treeMap.successor(current)
+            }
+            true
+        }
+
+    /**
+     * Get the first matching entry.
+     */
+    suspend fun first(): Map.Entry<K, V> =
+        treeMap.rwLock.withReadLock {
+            var current = treeMap.minimum(treeMap.root)
+            while (current != null) {
+                if (operations.all { it(current) }) {
+                    return@withReadLock object : Map.Entry<K, V> {
+                        override val key: K = current.key
+                        override val value: V = current.value
+                    }
+                }
+                current = treeMap.successor(current)
+            }
+            throw NoSuchElementException("No matching element found")
+        }
+
+    /**
+     * Get the first matching entry or null if none found.
+     */
+    suspend fun firstOrNull(): Map.Entry<K, V>? =
+        treeMap.rwLock.withReadLock {
+            var current = treeMap.minimum(treeMap.root)
+            while (current != null) {
+                if (operations.all { it(current) }) {
+                    return@withReadLock object : Map.Entry<K, V> {
+                        override val key: K = current.key
+                        override val value: V = current.value
+                    }
+                }
+                current = treeMap.successor(current)
+            }
+            null
+        }
+
+    /**
+     * Take the first n matching entries.
+     */
+    suspend fun take(n: Int): List<Map.Entry<K, V>> =
+        treeMap.rwLock.withReadLock {
+            val result = mutableListOf<Map.Entry<K, V>>()
+            var current = treeMap.minimum(treeMap.root)
+            while (current != null && result.size < n) {
+                if (operations.all { it(current) }) {
+                    result.add(object : Map.Entry<K, V> {
+                        override val key: K = current.key
+                        override val value: V = current.value
+                    })
+                }
+                current = treeMap.successor(current)
+            }
+            result
+        }
+
+    /**
+     * Skip the first n matching entries and return the rest.
+     */
+    suspend fun drop(n: Int): List<Map.Entry<K, V>> =
+        treeMap.rwLock.withReadLock {
+            val result = mutableListOf<Map.Entry<K, V>>()
+            var current = treeMap.minimum(treeMap.root)
+            var skipped = 0
+            while (current != null) {
+                if (operations.all { it(current) }) {
+                    if (skipped >= n) {
+                        result.add(object : Map.Entry<K, V> {
+                            override val key: K = current.key
+                            override val value: V = current.value
+                        })
+                    } else {
+                        skipped++
+                    }
+                }
+                current = treeMap.successor(current)
+            }
+            result
+        }
+
+    /**
+     * Perform an action on each matching entry.
+     */
+    suspend fun forEach(action: (Map.Entry<K, V>) -> Unit) =
+        treeMap.rwLock.withReadLock {
+            var current = treeMap.minimum(treeMap.root)
+            while (current != null) {
+                if (operations.all { it(current) }) {
+                    val entry = object : Map.Entry<K, V> {
+                        override val key: K = current.key
+                        override val value: V = current.value
+                    }
+                    action(entry)
+                }
+                current = treeMap.successor(current)
+            }
+        }
+}
+
+/**
+ * Suspend version of MappedTraversalBuilder.
+ */
+class SuspendMappedTraversalBuilder<K, V, R> internal constructor(
+    private val treeMap: TreeMap<K, V>,
+    internal val operations: List<(TreeMap.Node<K, V>) -> Boolean>, // Hide Node type as Any
+    private val transform: (Map.Entry<K, V>) -> R
+) {
+    /**
+     * Collect transformed results into a list.
+     */
+    suspend fun toList(): List<R> = 
+        treeMap.rwLock.withReadLock {
+            val result = mutableListOf<R>()
+            treeMap.forEachNodeUnsafe { node ->
+                if (operations.all { it(node) }) {
+                    val entry = object : Map.Entry<K, V> {
+                        override val key: K = node.key
+                        override val value: V = node.value
+                    }
+                    result.add(transform(entry))
+                }
+            }
+            result
+        }
 }

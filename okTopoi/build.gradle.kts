@@ -59,8 +59,7 @@ kotlin {
                 // JSON serialization library, works with the Kotlin serialization plugin.
                 api(libs.kotlinx.serialization.json)
 
-                implementation(libs.atomicfu)
-
+//                implementation(libs.atomicfu)
 
                 api(libs.kotlinx.io.core)
 
