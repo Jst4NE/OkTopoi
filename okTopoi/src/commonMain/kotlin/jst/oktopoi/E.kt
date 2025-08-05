@@ -1,5 +1,6 @@
 package jst.oktopoi
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
 import kotlinx.coroutines.flow.FlowCollector
@@ -11,6 +12,7 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.io.buffered
 import kotlinx.io.files.FileSystem
@@ -20,6 +22,7 @@ import kotlinx.io.writeString
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
 import kotlin.time.ExperimentalTime
+import co.touchlab.kermit.Logger
 
 
 @OptIn(ExperimentalForInheritanceCoroutinesApi::class)
@@ -37,47 +40,53 @@ class E<ValueType : Any?>(
     @OptIn(ExperimentalTime::class)
     internal fun setup() {
         if (persisted != null) {
-            persistCoroutineScope.launch {
-
-                val rootDir: Path
-                if (persisted.rootDir == null) {
-                    rootDir =
-                        initDefaultIO.filter { it?.second == persisted.fileSystem }.first()!!.first
-                } else {
-                    initIO.filter { it?.first == persisted.rootDir && it.second == persisted.fileSystem }
-                        .first()!!
-                    rootDir = persisted.rootDir
-                }
-
-                val fileSystem: FileSystem = persisted.fileSystem
-
-                val dirPath = Path(rootDir, callingClassName)
-                val filePath = Path(dirPath, propertyName)
-
-                fileSystem.createDirectories(dirPath)
-
-                if (fileSystem.exists(filePath) && (fileSystem.metadataOrNull(filePath)?.size
-                        ?: 0) != 0L
-                ) {
-                    fileSystem.source(filePath)
-                        .buffered()
-                        .use {
-                            state.value = Json.decodeFromString(
-                                persisted.valueSerializer,
-                                it.readString()
-                            )
-                        }
-                }
-
-                state
-                    .drop(1)
-                    .onEach { value ->
-                        fileSystem.sink(filePath).buffered().use { sink ->
-                            sink.writeString(Json.encodeToString(persisted.valueSerializer, value))
-                        }
+            runBlockingMultiplatform {
+                try {
+                    val rootDir: Path
+                    if (persisted.rootDir == null) {
+                        rootDir = initDefaultIO.filter { it?.second == persisted.fileSystem }.first()!!.first
+                    } else {
+                        initIO.filter { it?.first == persisted.rootDir && it.second == persisted.fileSystem }
+                            .first()!!
+                        rootDir = persisted.rootDir
                     }
-                    .launchIn(persistCoroutineScope)
 
+                    val fileSystem: FileSystem = persisted.fileSystem
+
+                    val dirPath = Path(rootDir, callingClassName)
+                    val filePath = Path(dirPath, propertyName)
+
+                    fileSystem.createDirectories(dirPath)
+
+                    if (fileSystem.exists(filePath) && (fileSystem.metadataOrNull(filePath)?.size
+                            ?: 0) != 0L
+                    ) {
+                        fileSystem.source(filePath)
+                            .buffered()
+                            .use {
+                                state.value = Json.decodeFromString(
+                                    persisted.valueSerializer,
+                                    it.readString()
+                                )
+                            }
+                    }
+
+                    state
+                        .drop(1)
+                        .onEach { value ->
+                            try {
+                                val content = Json.encodeToString(persisted.valueSerializer, value)
+                                fileSystem.sink(filePath).buffered().use { sink ->
+                                    sink.writeString(content)
+                                }
+                            } catch (e: Exception) {
+                                Logger.e("OkTopoi-E", e) { "Error writing value to $filePath" }
+                            }
+                        }.launchIn(persistCoroutineScope)
+
+                } catch (e: Exception) {
+                    Logger.e("OkTopoi-E", e) { "Error in E.setup: $e" }
+                }
             }
         }
 

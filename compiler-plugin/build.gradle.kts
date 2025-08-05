@@ -16,6 +16,11 @@ java {
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
     compilerOptions.jvmTarget.set(JvmTarget.JVM_1_8)
+    compilerOptions.allWarningsAsErrors.set(false)
+    compilerOptions.freeCompilerArgs.addAll(listOf(
+        "-Xsuppress-deprecated-jvm-target-warning",
+        "-Xallow-unstable-dependencies"
+    ))
 }
 
 publishing {

@@ -26,6 +26,12 @@ class OktopoiGradlePlugin : Plugin<Project> {
 //                        implementation("jst.oktopoi:okTopoi:${target.version}")
                     }
                 }
+                sourceSets.named("commonTest") {
+                    dependencies {
+                        implementation("jst.oktopoi:okTopoi:1.0.0")
+//                        implementation("jst.oktopoi:okTopoi:${target.version}")
+                    }
+                }
             }
         }
 
@@ -33,7 +39,9 @@ class OktopoiGradlePlugin : Plugin<Project> {
         target.plugins.withType<org.jetbrains.kotlin.gradle.plugin.KotlinPluginWrapper> {
             target.dependencies {
                 add("implementation", "jst.oktopoi:okTopoi:1.0.0")
+                add("testImplementation", "jst.oktopoi:okTopoi:1.0.0")
 //                add("implementation", "jst.oktopoi:okTopoi:${target.version}")
+//                add("testImplementation", "jst.oktopoi:okTopoi:${target.version}")
             }
         }
     }

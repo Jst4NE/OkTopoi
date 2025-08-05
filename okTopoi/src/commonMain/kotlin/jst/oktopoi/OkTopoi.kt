@@ -1,6 +1,6 @@
 package jst.oktopoi
 
-import jst.oktopoi.TreeMap.SecondaryKeyBuilder
+import jst.oktopoi.TreeMap.SecondaryIndexBuilder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -10,17 +10,22 @@ import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
 import kotlinx.serialization.InternalSerializationApi
 import kotlinx.serialization.serializer
+import co.touchlab.kermit.Logger
 
 internal val persistCoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 internal val initDefaultIO = MutableStateFlow<Pair<Path, FileSystem>?>(null)
 internal val initIO = MutableStateFlow<Pair<Path, FileSystem>?>(null)
 
 fun initDefaultIO(defaultRootDir: Path, fileSystem: FileSystem = SystemFileSystem) {
+    Logger.d("OkTopoi-Init") { "initDefaultIO called with rootDir: $defaultRootDir, fileSystem: $fileSystem" }
     initDefaultIO.value = Pair(defaultRootDir, fileSystem)
+    Logger.d("OkTopoi-Init") { "initDefaultIO set successfully" }
 }
 
 fun initRootDirIO(initRootDir: Path, fileSystem: FileSystem = SystemFileSystem) {
+    Logger.d("OkTopoi-Init") { "initRootDirIO called with rootDir: $initRootDir, fileSystem: $fileSystem" }
     initIO.value = Pair(initRootDir, fileSystem)
+    Logger.d("OkTopoi-Init") { "initRootDirIO set successfully" }
 }
 
 inline fun <reified ValueType : Any?> e(noinline defaultValue: (() -> ValueType?)? = null): E<ValueType> {
@@ -50,12 +55,12 @@ inline fun <reified ValueType : Any?> ep(
 
 inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> es(
     noinline keySelector: ((ValueType) -> KeyType)? = null,
-    noinline secondaryKeys: SecondaryKeyBuilder<ValueType>.() -> Unit = {}
+    noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Es<KeyType, ValueType> {
     return Es<KeyType, ValueType>(
         persisted = null,
         keySelector = keySelector,
-        sortingBy = null,
+        sortingBy = Comparator { k1, k2 -> k1.compareTo(k2) },
         secondaryKeys = secondaryKeys
     )
 }
@@ -63,7 +68,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> es(
 inline fun <reified KeyType : Any, reified ValueType : Any> es(
     noinline keySelector: ((ValueType) -> KeyType)? = null,
     comparator: Comparator<KeyType>,
-    noinline secondaryKeys: SecondaryKeyBuilder<ValueType>.() -> Unit = {}
+    noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Es<KeyType, ValueType> {
     return Es<KeyType, ValueType>(
         persisted = null,
@@ -78,7 +83,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
     noinline keySelector: ((ValueType) -> KeyType)? = null,
-    noinline secondaryKeys: SecondaryKeyBuilder<ValueType>.() -> Unit = {}
+    noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Es<KeyType, ValueType> {
     return Es<KeyType, ValueType>(
         persisted = PersistedEsInfo(
@@ -88,7 +93,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
             fileSystem
         ),
         keySelector = keySelector,
-        sortingBy = null,
+        sortingBy = Comparator { k1, k2 -> k1.compareTo(k2) },
         secondaryKeys = secondaryKeys
     )
 }
@@ -99,7 +104,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> eps(
     fileSystem: FileSystem = SystemFileSystem,
     noinline keySelector: ((ValueType) -> KeyType)? = null,
     sortingBy: Comparator<KeyType>,
-    noinline secondaryKeys: SecondaryKeyBuilder<ValueType>.() -> Unit = {}
+    noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Es<KeyType, ValueType> {
     return Es<KeyType, ValueType>(
         persisted = PersistedEsInfo(
