@@ -35,7 +35,7 @@ class OktopoiTransformer(
 ) : IrElementTransformerVoidWithContext() {
     
     private val oktopoiPackage = FqName("jst.oktopoi")
-    private val targetFunctions = setOf("e", "ep", "es", "eps")
+    private val targetFunctions = setOf("e", "ep", "es", "eps", "esps")
     
     override fun visitPropertyNew(declaration: IrProperty): IrStatement {
         val backingField = declaration.backingField ?: return super.visitPropertyNew(declaration)

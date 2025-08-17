@@ -15,6 +15,9 @@ import org.jetbrains.kotlin.ir.util.packageFqName
 import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
+// Try importing platform classes for proper type checking
+import org.jetbrains.kotlin.platform.wasm.WasmPlatform
+import org.jetbrains.kotlin.platform.js.JsPlatforms
 
 /**
  * Transformer that inlines runBlockingMultiplatform calls on non-JS platforms
@@ -48,10 +51,22 @@ class RunBlockingMultiplatformInliner(
     }
     
     private fun isWasmJsPlatform(): Boolean {
-        // Simple heuristic: check if we're targeting JS-like platforms
-        // This is conservative - we'll only inline on clearly non-JS platforms
-        val targetName = pluginContext.platform.toString().lowercase()
-        return targetName.contains("wasm") || targetName.contains("js")
+        // Use proper Kotlin compiler platform type checking - no string matching!
+        val platform = pluginContext.platform ?: return false
+        
+        return try {
+            // Check if any component platform is JS or WASM using actual type checking
+            platform.componentPlatforms.any { component ->
+                when {
+                    component is WasmPlatform -> true
+                    JsPlatforms.allJsPlatforms.any { it == component } -> true
+                    else -> false
+                }
+            }
+        } catch (_: Exception) {
+            // Conservative fallback: assume not JS/WASM if type checking fails
+            false
+        }
     }
     
     private fun isRunBlockingMultiplatformCall(expression: IrCall): Boolean {

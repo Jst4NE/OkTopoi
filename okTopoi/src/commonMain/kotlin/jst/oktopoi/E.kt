@@ -1,33 +1,17 @@
 package jst.oktopoi
 
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.drop
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
-import kotlinx.io.buffered
-import kotlinx.io.files.FileSystem
-import kotlinx.io.files.Path
-import kotlinx.io.readString
-import kotlinx.io.writeString
-import kotlinx.serialization.KSerializer
-import kotlinx.serialization.json.Json
-import kotlin.time.ExperimentalTime
-import co.touchlab.kermit.Logger
 
 
 @OptIn(ExperimentalForInheritanceCoroutinesApi::class)
-class E<ValueType : Any?>(
-    private val persisted: PersistedEInfo<ValueType>?,
+open class E<ValueType : Any?>(
     private val observing: StateFlow<ValueType>?,
     val defaultValue: (() -> ValueType?)?
 ) : MutableStateFlow<ValueType?> {
@@ -37,62 +21,10 @@ class E<ValueType : Any?>(
     lateinit var callingClassName: String
     lateinit var propertyName: String
 
-    @OptIn(ExperimentalTime::class)
-    internal fun setup() {
-        if (persisted != null) {
-            runBlockingMultiplatform {
-                try {
-                    val rootDir: Path
-                    if (persisted.rootDir == null) {
-                        rootDir = initDefaultIO.filter { it?.second == persisted.fileSystem }.first()!!.first
-                    } else {
-                        initIO.filter { it?.first == persisted.rootDir && it.second == persisted.fileSystem }
-                            .first()!!
-                        rootDir = persisted.rootDir
-                    }
-
-                    val fileSystem: FileSystem = persisted.fileSystem
-
-                    val dirPath = Path(rootDir, callingClassName)
-                    val filePath = Path(dirPath, propertyName)
-
-                    fileSystem.createDirectories(dirPath)
-
-                    if (fileSystem.exists(filePath) && (fileSystem.metadataOrNull(filePath)?.size
-                            ?: 0) != 0L
-                    ) {
-                        fileSystem.source(filePath)
-                            .buffered()
-                            .use {
-                                state.value = Json.decodeFromString(
-                                    persisted.valueSerializer,
-                                    it.readString()
-                                )
-                            }
-                    }
-
-                    state
-                        .drop(1)
-                        .onEach { value ->
-                            try {
-                                val content = Json.encodeToString(persisted.valueSerializer, value)
-                                fileSystem.sink(filePath).buffered().use { sink ->
-                                    sink.writeString(content)
-                                }
-                            } catch (e: Exception) {
-                                Logger.e("OkTopoi-E", e) { "Error writing value to $filePath" }
-                            }
-                        }.launchIn(persistCoroutineScope)
-
-                } catch (e: Exception) {
-                    Logger.e("OkTopoi-E", e) { "Error in E.setup: $e" }
-                }
-            }
-        }
-
+    internal open fun setup() {
         if (observing != null) {
             persistCoroutineScope.launch {
-                observing.onEach { state.emit(it) }.collect()
+                observing.collect { state.emit(it) }
             }
         }
     }
@@ -111,7 +43,7 @@ class E<ValueType : Any?>(
         get() = state.replayCache
 
     override suspend fun collect(collector: FlowCollector<ValueType?>): Nothing {
-        return state.collect(collector)
+        state.collect(collector)
     }
 
     override val subscriptionCount: StateFlow<Int>
@@ -138,11 +70,11 @@ class E<ValueType : Any?>(
         return value === null
     }
 
-    fun set(newValue: ValueType) {
+    open fun set(newValue: ValueType) {
         value = newValue
     }
 
-    fun setIfDifferent(newValue: ValueType?): Boolean {
+    open fun setIfDifferent(newValue: ValueType?): Boolean {
         var currentValue: ValueType?
         do {
             currentValue = value
@@ -153,7 +85,7 @@ class E<ValueType : Any?>(
         return true
     }
 
-    fun clear() {
+    open fun clear() {
         value = null
     }
 
@@ -162,9 +94,3 @@ class E<ValueType : Any?>(
     }
 
 }
-
-data class PersistedEInfo<ValueType : Any?>(
-    val valueSerializer: KSerializer<ValueType?>,
-    val rootDir: Path? = null,
-    val fileSystem: FileSystem
-)

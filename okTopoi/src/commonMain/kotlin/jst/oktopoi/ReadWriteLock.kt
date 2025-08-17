@@ -32,7 +32,7 @@ class ReadWriteLock {
         mutex.withLock {
             var yields = 0
             while (readerCount.load() > 0) {
-                if (yields < 5){
+                if (yields < OkTopoiConstants.READ_WRITE_LOCK_MAX_YIELD_ATTEMPTS){
                     yields++
                     yield()
                 } else{

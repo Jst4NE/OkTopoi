@@ -1,7 +1,5 @@
 package jst.oktopoi
 
-import androidx.compose.runtime.snapshots.SnapshotStateList
-
 /**
  * Thread-unsafe red-black tree implementation that serves as the core for all TreeMap operations.
  * 
@@ -24,8 +22,8 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
  * @param K the type of keys maintained by this tree
  * @param V the type of mapped values
  */
-internal class UnsafeTreeMapCore<K, V>(
-    private val keyComparator: Comparator<K>
+open class UnsafeTreeMapCore<K, V>(
+    protected val keyComparator: Comparator<K>
 ) {
     
     /**
@@ -128,12 +126,14 @@ internal class UnsafeTreeMapCore<K, V>(
     /**
      * The number of key-value mappings in this tree.
      */
-    val size: Int get() = _size
+    protected val sizeUnsafe: Int get() = _size
     
     /**
      * Returns true if this tree contains no key-value mappings.
      */
-    val isEmpty: Boolean get() = _size == 0
+    protected val isEmptyUnsafe: Boolean get() = _size == 0
+
+    protected open fun isEmpty(): Boolean = isEmptyUnsafe
     
     
     
@@ -151,7 +151,7 @@ internal class UnsafeTreeMapCore<K, V>(
      *             β     γ              α     β
      */
     private fun rotateLeft(x: Node<K, V>) {
-        val y = x.right ?: throw IllegalStateException("Cannot rotate left: right child is null")
+        val y = x.right!!
         
         // Turn y's left subtree into x's right subtree
         x.right = y.left
@@ -184,7 +184,7 @@ internal class UnsafeTreeMapCore<K, V>(
      *         α     β                      β     γ
      */
     private fun rotateRight(y: Node<K, V>) {
-        val x = y.left ?: throw IllegalStateException("Cannot rotate right: left child is null")
+        val x = y.left!!
         
         // Turn x's right subtree into y's left subtree
         y.left = x.right
@@ -387,18 +387,18 @@ internal class UnsafeTreeMapCore<K, V>(
      * Returns the value to which the specified key is mapped,
      * or null if this map contains no mapping for the key.
      */
-    fun getUnsafe(key: K): V? = findNode(key)?.value
+    protected fun getUnsafe(key: K): V? = findNode(key)?.value
     
     /**
      * Returns true if this map contains a mapping for the specified key.
      */
-    fun containsKeyUnsafe(key: K): Boolean = findNode(key) != null
+    protected fun containsKeyUnsafe(key: K): Boolean = findNode(key) != null
     
     /**
      * Returns true if this map maps one or more keys to the specified value.
      * This operation requires O(n) time.
      */
-    fun containsValueUnsafe(value: V): Boolean {
+    protected fun containsValueUnsafe(value: V): Boolean {
         return root?.let { containsValueInSubtree(it, value) } ?: false
     }
     
@@ -423,11 +423,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * @param changes list to record changes for observers (optional)
      * @return the previous value associated with key, or null if there was no mapping for key
      */
-    fun putUnsafe(
-        key: K, 
-        value: V,
-        changes: SnapshotStateList<Any>? = null
-    ): V? {
+    protected open fun putUnsafe(key: K, value: V): V? {
         // Handle empty tree case
         if (root == null) {
             root = Node(key, value, Color.BLACK)
@@ -467,9 +463,9 @@ internal class UnsafeTreeMapCore<K, V>(
         
         // Insert as child of parent
         if (cmp < 0) {
-            parent!!.left = newNode
+            parent.left = newNode
         } else {
-            parent!!.right = newNode
+            parent.right = newNode
         }
         
         // Update sizes up the tree
@@ -494,10 +490,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * @param changes list to record changes for observers (optional)
      * @return the previous value associated with key, or null if there was no mapping for key
      */
-    fun removeUnsafe(
-        key: K,
-        changes: SnapshotStateList<Any>? = null
-    ): V? {
+    protected open fun removeUnsafe(key: K): V? {
         val nodeToDelete = findNode(key) ?: return null
         val oldValue = nodeToDelete.value
         
@@ -562,9 +555,7 @@ internal class UnsafeTreeMapCore<K, V>(
     /**
      * Removes all mappings from this map.
      */
-    fun clearUnsafe(
-        changes: SnapshotStateList<Any>? = null
-    ) {
+    protected open fun clearUnsafe() {
         root = null
         _size = 0
         
@@ -579,7 +570,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Returns the first (lowest) key currently in this map.
      * Throws NoSuchElementException if this map is empty.
      */
-    fun firstKeyUnsafe(): K {
+    protected fun firstKeyUnsafe(): K {
         val node = root?.minimum() ?: throw NoSuchElementException("TreeMap is empty")
         return node.key
     }
@@ -588,7 +579,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Returns the last (highest) key currently in this map.
      * Throws NoSuchElementException if this map is empty.
      */
-    fun lastKeyUnsafe(): K {
+    protected fun lastKeyUnsafe(): K {
         val node = root?.maximum() ?: throw NoSuchElementException("TreeMap is empty")
         return node.key
     }
@@ -597,7 +588,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Returns a key-value mapping associated with the least key in this map,
      * or null if the map is empty.
      */
-    fun firstEntryUnsafe(): MapEntry<K, V>? {
+    protected fun firstEntryUnsafe(): MapEntry<K, V>? {
         val node = root?.minimum() ?: return null
         return MapEntry(node.key, node.value)
     }
@@ -606,7 +597,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Returns a key-value mapping associated with the greatest key in this map,
      * or null if the map is empty.
      */
-    fun lastEntryUnsafe(): MapEntry<K, V>? {
+    protected fun lastEntryUnsafe(): MapEntry<K, V>? {
         val node = root?.maximum() ?: return null
         return MapEntry(node.key, node.value)
     }
@@ -615,7 +606,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Returns the greatest key strictly less than the given key,
      * or null if no such key exists.
      */
-    fun lowerKeyUnsafe(key: K): K? {
+    protected fun lowerKeyUnsafe(key: K): K? {
         return lowerEntryUnsafe(key)?.key
     }
     
@@ -623,7 +614,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Returns the greatest key less than or equal to the given key,
      * or null if no such key exists.
      */
-    fun floorKeyUnsafe(key: K): K? {
+    protected fun floorKeyUnsafe(key: K): K? {
         return floorEntryUnsafe(key)?.key
     }
     
@@ -631,7 +622,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Returns the least key greater than or equal to the given key,
      * or null if no such key exists.
      */
-    fun ceilingKeyUnsafe(key: K): K? {
+    protected fun ceilingKeyUnsafe(key: K): K? {
         return ceilingEntryUnsafe(key)?.key
     }
     
@@ -639,7 +630,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Returns the least key strictly greater than the given key,
      * or null if no such key exists.
      */
-    fun higherKeyUnsafe(key: K): K? {
+    protected fun higherKeyUnsafe(key: K): K? {
         return higherEntryUnsafe(key)?.key
     }
     
@@ -647,7 +638,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Returns a key-value mapping associated with the greatest key strictly less than the given key,
      * or null if no such key exists.
      */
-    fun lowerEntryUnsafe(key: K): MapEntry<K, V>? {
+    protected fun lowerEntryUnsafe(key: K): MapEntry<K, V>? {
         var result: Node<K, V>? = null
         var current = root
         
@@ -669,7 +660,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Returns a key-value mapping associated with the greatest key less than or equal to the given key,
      * or null if no such key exists.
      */
-    fun floorEntryUnsafe(key: K): MapEntry<K, V>? {
+    protected fun floorEntryUnsafe(key: K): MapEntry<K, V>? {
         var result: Node<K, V>? = null
         var current = root
         
@@ -692,7 +683,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Returns a key-value mapping associated with the least key greater than or equal to the given key,
      * or null if no such key exists.
      */
-    fun ceilingEntryUnsafe(key: K): MapEntry<K, V>? {
+    protected fun ceilingEntryUnsafe(key: K): MapEntry<K, V>? {
         var result: Node<K, V>? = null
         var current = root
         
@@ -715,7 +706,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Returns a key-value mapping associated with the least key strictly greater than the given key,
      * or null if no such key exists.
      */
-    fun higherEntryUnsafe(key: K): MapEntry<K, V>? {
+    protected fun higherEntryUnsafe(key: K): MapEntry<K, V>? {
         var result: Node<K, V>? = null
         var current = root
         
@@ -737,9 +728,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Removes and returns a key-value mapping associated with the least key in this map,
      * or null if the map is empty.
      */
-    fun pollFirstEntryUnsafe(
-        changes: SnapshotStateList<Any>? = null
-    ): MapEntry<K, V>? {
+    protected fun pollFirstEntryUnsafe(): MapEntry<K, V>? {
         val node = root?.minimum() ?: return null
         val entry = MapEntry(node.key, node.value)
         
@@ -753,9 +742,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * Removes and returns a key-value mapping associated with the greatest key in this map,
      * or null if the map is empty.
      */
-    fun pollLastEntryUnsafe(
-        changes: SnapshotStateList<Any>? = null
-    ): MapEntry<K, V>? {
+    protected fun pollLastEntryUnsafe(): MapEntry<K, V>? {
         val node = root?.maximum() ?: return null
         val entry = MapEntry(node.key, node.value)
         
@@ -831,8 +818,8 @@ internal class UnsafeTreeMapCore<K, V>(
      * Collection view for keys.
      */
     inner class KeySet : MutableSet<K> {
-        override val size: Int get() = this@UnsafeTreeMapCore.size
-        override fun isEmpty(): Boolean = this@UnsafeTreeMapCore.isEmpty
+        override val size: Int get() = this@UnsafeTreeMapCore.sizeUnsafe
+        override fun isEmpty(): Boolean = this@UnsafeTreeMapCore.isEmptyUnsafe
         
         override fun contains(element: K): Boolean = containsKeyUnsafe(element)
         override fun containsAll(elements: Collection<K>): Boolean = elements.all { contains(it) }
@@ -885,8 +872,8 @@ internal class UnsafeTreeMapCore<K, V>(
      * Collection view for values.
      */
     inner class ValueCollection : MutableCollection<V> {
-        override val size: Int get() = this@UnsafeTreeMapCore.size
-        override fun isEmpty(): Boolean = this@UnsafeTreeMapCore.isEmpty
+        override val size: Int get() = this@UnsafeTreeMapCore.sizeUnsafe
+        override fun isEmpty(): Boolean = this@UnsafeTreeMapCore.isEmptyUnsafe
         
         override fun contains(element: V): Boolean = containsValueUnsafe(element)
         override fun containsAll(elements: Collection<V>): Boolean = elements.all { contains(it) }
@@ -938,8 +925,8 @@ internal class UnsafeTreeMapCore<K, V>(
      * Collection view for entries.
      */
     inner class EntrySet : MutableSet<MapEntry<K, V>> {
-        override val size: Int get() = this@UnsafeTreeMapCore.size
-        override fun isEmpty(): Boolean = this@UnsafeTreeMapCore.isEmpty
+        override val size: Int get() = this@UnsafeTreeMapCore.sizeUnsafe
+        override fun isEmpty(): Boolean = this@UnsafeTreeMapCore.isEmptyUnsafe
         
         override fun contains(element: MapEntry<K, V>): Boolean {
             val value = getUnsafe(element.key)
@@ -1001,17 +988,17 @@ internal class UnsafeTreeMapCore<K, V>(
     /**
      * Returns a Set view of the keys contained in this map.
      */
-    fun keysUnsafe(): MutableSet<K> = _keys
+    protected fun keysUnsafe(): MutableSet<K> = _keys
     
     /**
      * Returns a Collection view of the values contained in this map.
      */
-    fun valuesUnsafe(): MutableCollection<V> = _values
+    protected fun valuesUnsafe(): MutableCollection<V> = _values
     
     /**
      * Returns a Set view of the mappings contained in this map.
      */
-    fun entriesUnsafe(): MutableSet<MapEntry<K, V>> = _entries
+    protected fun entriesUnsafe(): MutableSet<MapEntry<K, V>> = _entries
     
     /**
      * Returns an iterator over the entries in this map.
@@ -1031,17 +1018,13 @@ internal class UnsafeTreeMapCore<K, V>(
      * @param changes list to record changes for observers (optional)
      * @return the previous value associated with the specified key, or null if there was no mapping for the key
      */
-    fun putIfAbsentUnsafe(
-        key: K, 
-        value: V,
-        changes: SnapshotStateList<Any>? = null
-    ): V? {
+    protected fun putIfAbsentUnsafe(key: K, value: V): V? {
         val existingNode = findNode(key)
         if (existingNode != null) {
             return existingNode.value
         }
         
-        putUnsafe(key, value, changes)
+        putUnsafe(key, value)
         return null
     }
     
@@ -1054,23 +1037,19 @@ internal class UnsafeTreeMapCore<K, V>(
      * @param changes list to record changes for observers (optional)
      * @return the new value associated with the specified key, or null if none
      */
-    fun computeUnsafe(
-        key: K,
-        remappingFunction: (K, V?) -> V?,
-        changes: SnapshotStateList<Any>? = null
-    ): V? {
+    protected fun computeUnsafe(key: K, remappingFunction: (K, V?) -> V?): V? {
         val oldValue = getUnsafe(key)
         val newValue = remappingFunction(key, oldValue)
         
         when {
             newValue == null -> {
                 if (oldValue != null) {
-                    removeUnsafe(key, changes)
+                    removeUnsafe(key)
                 }
                 return null
             }
             else -> {
-                putUnsafe(key, newValue, changes)
+                putUnsafe(key, newValue)
                 return newValue
             }
         }
@@ -1085,11 +1064,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * @param changes list to record changes for observers (optional)
      * @return the current (existing or computed) value associated with the specified key, or null if the computed value is null
      */
-    fun computeIfAbsentUnsafe(
-        key: K,
-        mappingFunction: (K) -> V?,
-        changes: SnapshotStateList<Any>? = null
-    ): V? {
+    protected fun computeIfAbsentUnsafe(key: K, mappingFunction: (K) -> V?): V? {
         val existingValue = getUnsafe(key)
         if (existingValue != null) {
             return existingValue
@@ -1097,7 +1072,7 @@ internal class UnsafeTreeMapCore<K, V>(
         
         val newValue = mappingFunction(key)
         if (newValue != null) {
-            putUnsafe(key, newValue, changes)
+            putUnsafe(key, newValue)
         }
         
         return newValue
@@ -1112,22 +1087,18 @@ internal class UnsafeTreeMapCore<K, V>(
      * @param changes list to record changes for observers (optional)
      * @return the new value associated with the specified key, or null if none
      */
-    fun computeIfPresentUnsafe(
-        key: K,
-        remappingFunction: (K, V) -> V?,
-        changes: SnapshotStateList<Any>? = null
-    ): V? {
+    protected fun computeIfPresentUnsafe(key: K, remappingFunction: (K, V) -> V?): V? {
         val oldValue = getUnsafe(key) ?: return null
         
         val newValue = remappingFunction(key, oldValue)
         
         when {
             newValue == null -> {
-                removeUnsafe(key, changes)
+                removeUnsafe(key)
                 return null
             }
             else -> {
-                putUnsafe(key, newValue, changes)
+                putUnsafe(key, newValue)
                 return newValue
             }
         }
@@ -1144,12 +1115,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * @param changes list to record changes for observers (optional)
      * @return the new value associated with the specified key, or null if no value is associated with the key
      */
-    fun mergeUnsafe(
-        key: K,
-        value: V,
-        remappingFunction: (V, V) -> V?,
-        changes: SnapshotStateList<Any>? = null
-    ): V? {
+    protected fun mergeUnsafe(key: K, value: V, remappingFunction: (V, V) -> V?): V? {
         val oldValue = getUnsafe(key)
         
         val newValue = if (oldValue == null) {
@@ -1161,12 +1127,12 @@ internal class UnsafeTreeMapCore<K, V>(
         when {
             newValue == null -> {
                 if (oldValue != null) {
-                    removeUnsafe(key, changes)
+                    removeUnsafe(key)
                 }
                 return null
             }
             else -> {
-                putUnsafe(key, newValue, changes)
+                putUnsafe(key, newValue)
                 return newValue
             }
         }
@@ -1181,11 +1147,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * @param changes list to record changes for observers (optional)
      * @return the previous value associated with the specified key, or null if there was no mapping for the key
      */
-    fun replaceUnsafe(
-        key: K,
-        value: V,
-        changes: SnapshotStateList<Any>? = null
-    ): V? {
+    protected fun replaceUnsafe(key: K, value: V): V? {
         val existingNode = findNode(key) ?: return null
         val oldValue = existingNode.value
         
@@ -1204,12 +1166,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * @param changes list to record changes for observers (optional)
      * @return true if the value was replaced
      */
-    fun replaceUnsafe(
-        key: K,
-        oldValue: V,
-        newValue: V,
-        changes: SnapshotStateList<Any>? = null
-    ): Boolean {
+    protected fun replaceUnsafe(key: K, oldValue: V, newValue: V): Boolean {
         val existingNode = findNode(key) ?: return false
         
         if (existingNode.value != oldValue) {
@@ -1228,12 +1185,9 @@ internal class UnsafeTreeMapCore<K, V>(
      * @param secondaryIndexes map of secondary indexes to update
      * @param changes list to record changes for observers (optional)
      */
-    fun putAllUnsafe(
-        from: Map<out K, V>,
-        changes: SnapshotStateList<Any>? = null
-    ) {
+    protected fun putAllUnsafe(from: Map<out K, V>) {
         from.forEach { (key, value) ->
-            putUnsafe(key, value, changes)
+            putUnsafe(key, value)
         }
     }
     
@@ -1250,7 +1204,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * @param toInclusive true if the high endpoint is to be included in the returned view
      * @return list of entries in the specified range
      */
-    fun subMapEntriesUnsafe(
+    protected fun subMapEntriesUnsafe(
         fromKey: K?,
         fromInclusive: Boolean,
         toKey: K?,
@@ -1289,7 +1243,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * @param toKey high endpoint (exclusive) of the keys in the returned entries
      * @return list of entries with keys less than toKey
      */
-    fun headMapEntriesUnsafe(toKey: K): List<MapEntry<K, V>> {
+    protected fun headMapEntriesUnsafe(toKey: K): List<MapEntry<K, V>> {
         return subMapEntriesUnsafe(null, true, toKey, false)
     }
     
@@ -1299,7 +1253,7 @@ internal class UnsafeTreeMapCore<K, V>(
      * @param fromKey low endpoint (inclusive) of the keys in the returned entries
      * @return list of entries with keys greater than or equal to fromKey
      */
-    fun tailMapEntriesUnsafe(fromKey: K): List<MapEntry<K, V>> {
+    protected fun tailMapEntriesUnsafe(fromKey: K): List<MapEntry<K, V>> {
         return subMapEntriesUnsafe(fromKey, true, null, true)
     }
     
@@ -1307,54 +1261,11 @@ internal class UnsafeTreeMapCore<K, V>(
     // Utility and Debug Methods
     // ========================================================================
     
-    /**
-     * Validates the red-black tree invariants.
-     * This method is useful for debugging and testing.
-     * 
-     * @return true if all red-black tree invariants are satisfied, false otherwise
-     */
-    fun validateRedBlackPropertiesUnsafe(): Boolean {
-        if (root == null) return true
-        
-        // Property 1: Root must be black
-        if (root!!.color != Color.BLACK) return false
-        
-        // Check all other properties recursively
-        return validateNode(root!!) != -1
-    }
-    
-    /**
-     * Recursively validates red-black tree properties for a subtree.
-     * 
-     * @param node root of the subtree to validate
-     * @return the black height of the subtree, or -1 if properties are violated
-     */
-    private fun validateNode(node: Node<K, V>): Int {
-        // Property 2: Leaf nodes (nulls) are considered black - implicitly satisfied
-        
-        val leftBlackHeight = node.left?.let { validateNode(it) } ?: 0
-        val rightBlackHeight = node.right?.let { validateNode(it) } ?: 0
-        
-        // Property 4: All paths from any node to its descendant leaves contain the same number of black nodes
-        if (leftBlackHeight == -1 || rightBlackHeight == -1 || leftBlackHeight != rightBlackHeight) {
-            return -1
-        }
-        
-        // Property 3: Red nodes have only black children
-        if (node.color == Color.RED) {
-            if ((node.left?.color == Color.RED) || (node.right?.color == Color.RED)) {
-                return -1
-            }
-        }
-        
-        // Return black height
-        return leftBlackHeight + if (node.color == Color.BLACK) 1 else 0
-    }
     
     /**
      * Returns a string representation of the tree structure for debugging.
      */
-    fun debugStringUnsafe(): String {
+    protected fun debugStringUnsafe(): String {
         if (root == null) return "Empty tree"
         
         val sb = StringBuilder()

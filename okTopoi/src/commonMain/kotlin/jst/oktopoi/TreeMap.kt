@@ -1,10 +1,5 @@
 package jst.oktopoi
 
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
-import co.touchlab.kermit.Logger
-import kotlinx.coroutines.channels.BufferOverflow
 
 /**
  * A Red-Black tree based implementation of MutableMap with NavigableMap operations.
@@ -23,15 +18,33 @@ import kotlinx.coroutines.channels.BufferOverflow
  * - BlockingTreeMapView: Blocking access wrapper for non-suspend contexts
  * - Public API: Delegates to blocking view by default
  * 
+ * ## Secondary Index Usage Warning
+ * 
+ * **IMPORTANT**: When using secondary indexes, values should be treated as immutable 
+ * after being stored in the map. Mutating values after storage can cause inconsistent 
+ * secondary index state and incorrect query results.
+ * 
+ * **Safe approach:**
+ * ```kotlin
+ * map.put("key", user)  // Store immutable value
+ * map.replace("key", user.copy(department = "Sales"))  // Update via replacement
+ * ```
+ * 
+ * **Unsafe approach:**
+ * ```kotlin
+ * map.put("key", user)  // Store value
+ * user.department = "Sales"  // Direct mutation - breaks secondary indexes!
+ * ```
+ * 
  * @param K the type of keys maintained by this map
  * @param V the type of mapped values
  * @param keyComparator the comparator used to order the keys, or null for natural ordering
  */
 open class TreeMap<K, V>(
-    protected val keyComparator: Comparator<K> = Comparator { k1, k2 ->
+    keyComparator: Comparator<K> = Comparator { k1, k2 ->
         (k1 as Comparable<K>).compareTo(k2)
     }
-) : MutableMap<K, V> {
+) : UnsafeTreeMapCore<K, V>(keyComparator), MutableMap<K, V> {
     
     /**
      * Sealed class representing different types of changes to the TreeMap.
@@ -67,13 +80,36 @@ open class TreeMap<K, V>(
         class Rebuild<K, V> : MapChange<K, V>()
     }
     
-    // Core components
-    private val unsafeCore = UnsafeTreeMapCore<K, V>(keyComparator)
+    // Core components 
     private val rwLock = ReadWriteLock()
     
     // Secondary index management (moved from UnsafeTreeMapCore)
     private val secondaryKeyExtractors = mutableMapOf<String, (V) -> Any?>()
     private val secondaryIndexes = mutableMapOf<String, MutableMap<Any?, MutableSet<K>>>()
+    
+    // ========================================================================
+    // Override core operations to add secondary index management
+    // ========================================================================
+    
+    override fun putUnsafe(key: K, value: V): V? {
+        val oldValue = super.putUnsafe(key, value)
+        updateSecondaryIndexes(key, oldValue, value)
+        return oldValue
+    }
+    
+    override fun removeUnsafe(key: K): V? {
+        val oldValue = super.removeUnsafe(key)
+        if (oldValue != null) {
+            updateSecondaryIndexes(key, oldValue, null)
+        }
+        return oldValue
+    }
+    
+    override fun clearUnsafe() {
+        super.clearUnsafe()
+        // Clear all secondary indexes
+        secondaryIndexes.values.forEach { it.clear() }
+    }
     
     /**
      * Extracts the secondary key from a value using the registered extractor.
@@ -86,16 +122,6 @@ open class TreeMap<K, V>(
         return extractor(value)
     }
     
-    
-    
-    // Flow-based change notifications for reactive programming
-    private val _changeFlow = MutableSharedFlow<MapChange<K, V>>(replay = 0, extraBufferCapacity = 512)
-    
-    /**
-     * Flow of changes made to this TreeMap.
-     * Useful for reactive programming and implementing persistence.
-     */
-    val changes: SharedFlow<MapChange<K, V>> = _changeFlow.asSharedFlow()
     
     // View instances (internal for compiler plugin access)
     internal val blocking: BlockingTreeMapView = BlockingTreeMapView()
@@ -176,7 +202,7 @@ open class TreeMap<K, V>(
         keyExtractor: (V) -> Any?,
         index: MutableMap<Any?, MutableSet<K>>
     ) {
-        unsafeCore.entriesUnsafe().forEach { entry ->
+        entriesUnsafe().forEach { entry ->
             val secondaryKey = keyExtractor(entry.value)
             index.getOrPut(secondaryKey) { mutableSetOf() }.add(entry.key)  // Allow null as valid secondary key
         }
@@ -228,33 +254,19 @@ open class TreeMap<K, V>(
     override fun get(key: K): V? = blocking.get(key)
     
     override fun put(key: K, value: V): V? {
-        val oldValue = blocking.put(key, value)
-        updateSecondaryIndexes(key, oldValue, value)
-        emitChange(MapChange.Put(key, value, oldValue != null, oldValue))
-        return oldValue
+        return blocking.put(key, value)
     }
     
     override fun remove(key: K): V? {
-        val oldValue = blocking.remove(key)
-        if (oldValue != null) {
-            updateSecondaryIndexes(key, oldValue, null)
-            emitChange(MapChange.Removed(key, oldValue))
-        }
-        return oldValue
+        return blocking.remove(key)
     }
     
     override fun putAll(from: Map<out K, V>) {
-        // Process each entry individually to maintain secondary indexes properly
-        from.forEach { (key, value) ->
-            put(key, value)  // This will handle secondary index updates and change emission
-        }
+        return blocking.putAll(from)
     }
     
     override fun clear() {
-        blocking.clear()
-        // Clear all secondary indexes
-        secondaryIndexes.values.forEach { it.clear() }
-        emitChange(MapChange.Cleared())
+        return blocking.clear()
     }
     
     override val keys: MutableSet<K>
@@ -286,7 +298,7 @@ open class TreeMap<K, V>(
     fun pollLastEntry(): MapEntry<K, V>? = blocking.pollLastEntry()
 
     fun getBy(vararg criteria: Pair<String, Any?>): Collection<V> {
-        return getPrimaryKeysBySecondaryKey(*criteria).map { this[it]!! }
+        return getPrimaryKeysBySecondaryKey(*criteria).mapNotNull { this[it] }
     }
 
     // Secondary index operations
@@ -318,14 +330,14 @@ open class TreeMap<K, V>(
     }
     
     // Modern Map API
-    fun putIfAbsent(key: K, value: V): V? = blocking.putIfAbsent(key, value)
-    fun replace(key: K, value: V): V? = blocking.replace(key, value)
-    fun replace(key: K, oldValue: V, newValue: V): Boolean = blocking.replace(key, oldValue, newValue)
+    open fun putIfAbsent(key: K, value: V): V? = blocking.putIfAbsent(key, value)
+    open fun replace(key: K, value: V): V? = blocking.replace(key, value)
+    open fun replace(key: K, oldValue: V, newValue: V): Boolean = blocking.replace(key, oldValue, newValue)
     
-    fun compute(key: K, remappingFunction: (K, V?) -> V?): V? = blocking.compute(key, remappingFunction)
-    fun computeIfAbsent(key: K, mappingFunction: (K) -> V?): V? = blocking.computeIfAbsent(key, mappingFunction)
-    fun computeIfPresent(key: K, remappingFunction: (K, V) -> V?): V? = blocking.computeIfPresent(key, remappingFunction)
-    fun merge(key: K, value: V, remappingFunction: (V, V) -> V?): V? = blocking.merge(key, value, remappingFunction)
+    open fun compute(key: K, remappingFunction: (K, V?) -> V?): V? = blocking.compute(key, remappingFunction)
+    open fun computeIfAbsent(key: K, mappingFunction: (K) -> V?): V? = blocking.computeIfAbsent(key, mappingFunction)
+    open fun computeIfPresent(key: K, remappingFunction: (K, V) -> V?): V? = blocking.computeIfPresent(key, remappingFunction)
+    open fun merge(key: K, value: V, remappingFunction: (V, V) -> V?): V? = blocking.merge(key, value, remappingFunction)
     
     // Range operations
     fun subMapEntries(fromKey: K?, fromInclusive: Boolean, toKey: K?, toInclusive: Boolean): List<MapEntry<K, V>> =
@@ -335,22 +347,9 @@ open class TreeMap<K, V>(
     fun tailMapEntries(fromKey: K): List<MapEntry<K, V>> = blocking.tailMapEntries(fromKey)
     
 //    // Debug utilities
-//    fun validateRedBlackProperties(): Boolean =
-//        runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.validateRedBlackPropertiesUnsafe() } }
-//
 //    fun debugString(): String =
-//        runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.debugStringUnsafe() } }
+//        runBlockingMultiplatform { rwLock.withReadLock { debugStringUnsafe() } }
     
-    /**
-     * Emit a change notification to the flow.
-     */
-    private fun emitChange(change: MapChange<K, V>) {
-
-        val success = _changeFlow.tryEmit(change)
-        if (!success) {
-            Logger.w("OkTopoi-TreeMap") { "Failed to emit change: $change" }
-        }
-    }
     
     // ========================================================================
     // SuspendTreeMapView - Suspend-optimized access wrapper
@@ -364,82 +363,76 @@ open class TreeMap<K, V>(
         
         // Basic Map operations
         suspend fun get(key: K): V? = 
-            rwLock.withReadLock { unsafeCore.getUnsafe(key) }
+            rwLock.withReadLock { getUnsafe(key) }
         
         suspend fun put(key: K, value: V): V? = 
-            rwLock.withWriteLock { 
-                unsafeCore.putUnsafe(key, value) 
-            }
+            rwLock.withWriteLock { putUnsafe(key, value) }
         
         suspend fun remove(key: K): V? = 
-            rwLock.withWriteLock { 
-                unsafeCore.removeUnsafe(key) 
-            }
+            rwLock.withWriteLock { removeUnsafe(key) }
         
         suspend fun clear() = 
-            rwLock.withWriteLock { 
-                unsafeCore.clearUnsafe() 
-            }
+            rwLock.withWriteLock { clearUnsafe() }
         
         suspend fun containsKey(key: K): Boolean = 
-            rwLock.withReadLock { unsafeCore.containsKeyUnsafe(key) }
+            rwLock.withReadLock { containsKeyUnsafe(key) }
         
         suspend fun containsValue(value: V): Boolean = 
-            rwLock.withReadLock { unsafeCore.containsValueUnsafe(value) }
+            rwLock.withReadLock { containsValueUnsafe(value) }
         
         suspend fun putAll(from: Map<out K, V>) = 
             rwLock.withWriteLock { 
-                unsafeCore.putAllUnsafe(from) 
+                from.forEach { (key, value) -> putUnsafe(key, value) }
             }
         
-        val size: Int get() = unsafeCore.size
-        val isEmpty: Boolean get() = unsafeCore.isEmpty
+        val size: Int get() = size
+        val isEmpty: Boolean get() = isEmpty
         
         // NavigableMap operations
         suspend fun firstKey(): K = 
-            rwLock.withReadLock { unsafeCore.firstKeyUnsafe() }
+            rwLock.withReadLock { firstKeyUnsafe() }
         
         suspend fun lastKey(): K = 
-            rwLock.withReadLock { unsafeCore.lastKeyUnsafe() }
+            rwLock.withReadLock { lastKeyUnsafe() }
         
         suspend fun firstEntry(): MapEntry<K, V>? = 
-            rwLock.withReadLock { unsafeCore.firstEntryUnsafe() }
+            rwLock.withReadLock { firstEntryUnsafe() }
         
         suspend fun lastEntry(): MapEntry<K, V>? = 
-            rwLock.withReadLock { unsafeCore.lastEntryUnsafe() }
+            rwLock.withReadLock { lastEntryUnsafe() }
         
         suspend fun lowerKey(key: K): K? = 
-            rwLock.withReadLock { unsafeCore.lowerKeyUnsafe(key) }
+            rwLock.withReadLock { lowerKeyUnsafe(key) }
         
         suspend fun floorKey(key: K): K? = 
-            rwLock.withReadLock { unsafeCore.floorKeyUnsafe(key) }
+            rwLock.withReadLock { floorKeyUnsafe(key) }
         
         suspend fun ceilingKey(key: K): K? = 
-            rwLock.withReadLock { unsafeCore.ceilingKeyUnsafe(key) }
+            rwLock.withReadLock { ceilingKeyUnsafe(key) }
         
         suspend fun higherKey(key: K): K? = 
-            rwLock.withReadLock { unsafeCore.higherKeyUnsafe(key) }
+            rwLock.withReadLock { higherKeyUnsafe(key) }
         
         suspend fun lowerEntry(key: K): MapEntry<K, V>? = 
-            rwLock.withReadLock { unsafeCore.lowerEntryUnsafe(key) }
+            rwLock.withReadLock { lowerEntryUnsafe(key) }
         
         suspend fun floorEntry(key: K): MapEntry<K, V>? = 
-            rwLock.withReadLock { unsafeCore.floorEntryUnsafe(key) }
+            rwLock.withReadLock { floorEntryUnsafe(key) }
         
         suspend fun ceilingEntry(key: K): MapEntry<K, V>? = 
-            rwLock.withReadLock { unsafeCore.ceilingEntryUnsafe(key) }
+            rwLock.withReadLock { ceilingEntryUnsafe(key) }
         
         suspend fun higherEntry(key: K): MapEntry<K, V>? = 
-            rwLock.withReadLock { unsafeCore.higherEntryUnsafe(key) }
+            rwLock.withReadLock { higherEntryUnsafe(key) }
         
         suspend fun pollFirstEntry(): MapEntry<K, V>? = 
             rwLock.withWriteLock { 
-                unsafeCore.pollFirstEntryUnsafe() 
+                pollFirstEntryUnsafe() 
             }
         
         suspend fun pollLastEntry(): MapEntry<K, V>? = 
             rwLock.withWriteLock { 
-                unsafeCore.pollLastEntryUnsafe() 
+                pollLastEntryUnsafe() 
             }
         
         // Secondary index operations
@@ -461,60 +454,60 @@ open class TreeMap<K, V>(
         // Modern Map API
         suspend fun putIfAbsent(key: K, value: V): V? = 
             rwLock.withWriteLock { 
-                unsafeCore.putIfAbsentUnsafe(key, value) 
+                putIfAbsentUnsafe(key, value) 
             }
         
         suspend fun replace(key: K, value: V): V? = 
             rwLock.withWriteLock { 
-                unsafeCore.replaceUnsafe(key, value) 
+                replaceUnsafe(key, value) 
             }
         
         suspend fun replace(key: K, oldValue: V, newValue: V): Boolean = 
             rwLock.withWriteLock { 
-                unsafeCore.replaceUnsafe(key, oldValue, newValue) 
+                replaceUnsafe(key, oldValue, newValue) 
             }
         
         suspend fun compute(key: K, remappingFunction: (K, V?) -> V?): V? = 
             rwLock.withWriteLock { 
-                unsafeCore.computeUnsafe(key, remappingFunction) 
+                computeUnsafe(key, remappingFunction) 
             }
         
         suspend fun computeIfAbsent(key: K, mappingFunction: (K) -> V?): V? = 
             rwLock.withWriteLock { 
-                unsafeCore.computeIfAbsentUnsafe(key, mappingFunction) 
+                computeIfAbsentUnsafe(key, mappingFunction) 
             }
         
         suspend fun computeIfPresent(key: K, remappingFunction: (K, V) -> V?): V? = 
             rwLock.withWriteLock { 
-                unsafeCore.computeIfPresentUnsafe(key, remappingFunction) 
+                computeIfPresentUnsafe(key, remappingFunction) 
             }
         
         suspend fun merge(key: K, value: V, remappingFunction: (V, V) -> V?): V? = 
             rwLock.withWriteLock { 
-                unsafeCore.mergeUnsafe(key, value, remappingFunction) 
+                mergeUnsafe(key, value, remappingFunction) 
             }
         
         // Range operations
         suspend fun subMapEntries(fromKey: K?, fromInclusive: Boolean, toKey: K?, toInclusive: Boolean): List<MapEntry<K, V>> = 
             rwLock.withReadLock { 
-                unsafeCore.subMapEntriesUnsafe(fromKey, fromInclusive, toKey, toInclusive) 
+                subMapEntriesUnsafe(fromKey, fromInclusive, toKey, toInclusive) 
             }
         
         suspend fun headMapEntries(toKey: K): List<MapEntry<K, V>> = 
-            rwLock.withReadLock { unsafeCore.headMapEntriesUnsafe(toKey) }
+            rwLock.withReadLock { headMapEntriesUnsafe(toKey) }
         
         suspend fun tailMapEntries(fromKey: K): List<MapEntry<K, V>> = 
-            rwLock.withReadLock { unsafeCore.tailMapEntriesUnsafe(fromKey) }
+            rwLock.withReadLock { tailMapEntriesUnsafe(fromKey) }
         
         // Collection views (Note: These return non-suspend collections for compatibility)
         val keys: MutableSet<K> 
-            get() = runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.keysUnsafe() } }
+            get() = runBlockingMultiplatform { rwLock.withReadLock { keysUnsafe() } }
         
         val values: MutableCollection<V> 
-            get() = runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.valuesUnsafe() } }
+            get() = runBlockingMultiplatform { rwLock.withReadLock { valuesUnsafe() } }
         
         val entries: MutableSet<MapEntry<K, V>> 
-            get() = runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.entriesUnsafe() } }
+            get() = runBlockingMultiplatform { rwLock.withReadLock { entriesUnsafe() } }
     }
     
     // ========================================================================
@@ -529,109 +522,111 @@ open class TreeMap<K, V>(
         
         // Basic Map operations
         override fun get(key: K): V? = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.getUnsafe(key) } }
+            runBlockingMultiplatform { rwLock.withReadLock { getUnsafe(key) } }
         
         override fun put(key: K, value: V): V? = 
             runBlockingMultiplatform { 
-                rwLock.withWriteLock { 
-                    unsafeCore.putUnsafe(key, value) 
-                }
+                rwLock.withWriteLock { putUnsafe(key, value) }
             }
         
         override fun remove(key: K): V? = 
             runBlockingMultiplatform { 
-                rwLock.withWriteLock { 
-                    unsafeCore.removeUnsafe(key) 
-                }
+                rwLock.withWriteLock { removeUnsafe(key) }
             }
         
         override fun clear() = 
             runBlockingMultiplatform { 
-                rwLock.withWriteLock { 
-                    unsafeCore.clearUnsafe() 
-                }
+                rwLock.withWriteLock { clearUnsafe() }
             }
         
         override fun containsKey(key: K): Boolean = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.containsKeyUnsafe(key) } }
+            runBlockingMultiplatform { rwLock.withReadLock { containsKeyUnsafe(key) } }
         
         override fun containsValue(value: V): Boolean = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.containsValueUnsafe(value) } }
+            runBlockingMultiplatform { rwLock.withReadLock { containsValueUnsafe(value) } }
         
         override fun putAll(from: Map<out K, V>) = 
             runBlockingMultiplatform { 
                 rwLock.withWriteLock { 
-                    unsafeCore.putAllUnsafe(from) 
+                    from.forEach { (key, value) -> putUnsafe(key, value) }
                 }
             }
         
-        override val size: Int get() = unsafeCore.size
-        override fun isEmpty(): Boolean = unsafeCore.isEmpty
-        
+        override val size: Int get() = runBlockingMultiplatform {
+            rwLock.withReadLock {
+                sizeUnsafe
+            }
+        }
+        override fun isEmpty(): Boolean = runBlockingMultiplatform {
+            rwLock.withReadLock {
+                isEmptyUnsafe
+            }
+        }
+
         // Collection views
         override val keys: MutableSet<K> 
-            get() = runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.keysUnsafe() } }
+            get() = runBlockingMultiplatform { rwLock.withReadLock { keysUnsafe() } }
         
         override val values: MutableCollection<V> 
-            get() = runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.valuesUnsafe() } }
+            get() = runBlockingMultiplatform { rwLock.withReadLock { valuesUnsafe() } }
         
         override val entries: MutableSet<MutableMap.MutableEntry<K, V>>
             get() = runBlockingMultiplatform { 
                 rwLock.withReadLock { 
                     // MapEntry now properly implements MutableMap.MutableEntry - safe cast
                     @Suppress("UNCHECKED_CAST")
-                    unsafeCore.entriesUnsafe() as MutableSet<MutableMap.MutableEntry<K, V>>
+                    entriesUnsafe() as MutableSet<MutableMap.MutableEntry<K, V>>
                 }
             }
         
         // NavigableMap operations
         fun firstKey(): K = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.firstKeyUnsafe() } }
+            runBlockingMultiplatform { rwLock.withReadLock { firstKeyUnsafe() } }
         
         fun lastKey(): K = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.lastKeyUnsafe() } }
+            runBlockingMultiplatform { rwLock.withReadLock { lastKeyUnsafe() } }
         
         fun firstEntry(): MapEntry<K, V>? = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.firstEntryUnsafe() } }
+            runBlockingMultiplatform { rwLock.withReadLock { firstEntryUnsafe() } }
         
         fun lastEntry(): MapEntry<K, V>? = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.lastEntryUnsafe() } }
+            runBlockingMultiplatform { rwLock.withReadLock { lastEntryUnsafe() } }
         
         fun lowerKey(key: K): K? = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.lowerKeyUnsafe(key) } }
+            runBlockingMultiplatform { rwLock.withReadLock { lowerKeyUnsafe(key) } }
         
         fun floorKey(key: K): K? = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.floorKeyUnsafe(key) } }
+            runBlockingMultiplatform { rwLock.withReadLock { floorKeyUnsafe(key) } }
         
         fun ceilingKey(key: K): K? = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.ceilingKeyUnsafe(key) } }
+            runBlockingMultiplatform { rwLock.withReadLock { ceilingKeyUnsafe(key) } }
         
         fun higherKey(key: K): K? = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.higherKeyUnsafe(key) } }
+            runBlockingMultiplatform { rwLock.withReadLock { higherKeyUnsafe(key) } }
         
         fun lowerEntry(key: K): MapEntry<K, V>? = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.lowerEntryUnsafe(key) } }
+            runBlockingMultiplatform { rwLock.withReadLock { lowerEntryUnsafe(key) } }
         
         fun floorEntry(key: K): MapEntry<K, V>? = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.floorEntryUnsafe(key) } }
+            runBlockingMultiplatform { rwLock.withReadLock { floorEntryUnsafe(key) } }
         
         fun ceilingEntry(key: K): MapEntry<K, V>? = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.ceilingEntryUnsafe(key) } }
+            runBlockingMultiplatform { rwLock.withReadLock { ceilingEntryUnsafe(key) } }
         
         fun higherEntry(key: K): MapEntry<K, V>? = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.higherEntryUnsafe(key) } }
+            runBlockingMultiplatform { rwLock.withReadLock { higherEntryUnsafe(key) } }
         
         fun pollFirstEntry(): MapEntry<K, V>? = 
             runBlockingMultiplatform { 
                 rwLock.withWriteLock { 
-                    unsafeCore.pollFirstEntryUnsafe() 
+                    pollFirstEntryUnsafe() 
                 }
             }
         
         fun pollLastEntry(): MapEntry<K, V>? = 
             runBlockingMultiplatform { 
                 rwLock.withWriteLock { 
-                    unsafeCore.pollLastEntryUnsafe() 
+                    pollLastEntryUnsafe() 
                 }
             }
         
@@ -655,49 +650,49 @@ open class TreeMap<K, V>(
         fun putIfAbsent(key: K, value: V): V? = 
             runBlockingMultiplatform { 
                 rwLock.withWriteLock { 
-                    unsafeCore.putIfAbsentUnsafe(key, value) 
+                    putIfAbsentUnsafe(key, value) 
                 }
             }
         
         fun replace(key: K, value: V): V? = 
             runBlockingMultiplatform { 
                 rwLock.withWriteLock { 
-                    unsafeCore.replaceUnsafe(key, value) 
+                    replaceUnsafe(key, value) 
                 }
             }
         
         fun replace(key: K, oldValue: V, newValue: V): Boolean = 
             runBlockingMultiplatform { 
                 rwLock.withWriteLock { 
-                    unsafeCore.replaceUnsafe(key, oldValue, newValue) 
+                    replaceUnsafe(key, oldValue, newValue) 
                 }
             }
         
         fun compute(key: K, remappingFunction: (K, V?) -> V?): V? = 
             runBlockingMultiplatform { 
                 rwLock.withWriteLock { 
-                    unsafeCore.computeUnsafe(key, remappingFunction) 
+                    computeUnsafe(key, remappingFunction) 
                 }
             }
         
         fun computeIfAbsent(key: K, mappingFunction: (K) -> V?): V? = 
             runBlockingMultiplatform { 
                 rwLock.withWriteLock { 
-                    unsafeCore.computeIfAbsentUnsafe(key, mappingFunction) 
+                    computeIfAbsentUnsafe(key, mappingFunction) 
                 }
             }
         
         fun computeIfPresent(key: K, remappingFunction: (K, V) -> V?): V? = 
             runBlockingMultiplatform { 
                 rwLock.withWriteLock { 
-                    unsafeCore.computeIfPresentUnsafe(key, remappingFunction) 
+                    computeIfPresentUnsafe(key, remappingFunction) 
                 }
             }
         
         fun merge(key: K, value: V, remappingFunction: (V, V) -> V?): V? = 
             runBlockingMultiplatform { 
                 rwLock.withWriteLock { 
-                    unsafeCore.mergeUnsafe(key, value, remappingFunction) 
+                    mergeUnsafe(key, value, remappingFunction) 
                 }
             }
         
@@ -705,14 +700,14 @@ open class TreeMap<K, V>(
         fun subMapEntries(fromKey: K?, fromInclusive: Boolean, toKey: K?, toInclusive: Boolean): List<MapEntry<K, V>> = 
             runBlockingMultiplatform { 
                 rwLock.withReadLock { 
-                    unsafeCore.subMapEntriesUnsafe(fromKey, fromInclusive, toKey, toInclusive) 
+                    subMapEntriesUnsafe(fromKey, fromInclusive, toKey, toInclusive) 
                 }
             }
         
         fun headMapEntries(toKey: K): List<MapEntry<K, V>> = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.headMapEntriesUnsafe(toKey) } }
+            runBlockingMultiplatform { rwLock.withReadLock { headMapEntriesUnsafe(toKey) } }
         
         fun tailMapEntries(fromKey: K): List<MapEntry<K, V>> = 
-            runBlockingMultiplatform { rwLock.withReadLock { unsafeCore.tailMapEntriesUnsafe(fromKey) } }
+            runBlockingMultiplatform { rwLock.withReadLock { tailMapEntriesUnsafe(fromKey) } }
     }
 }

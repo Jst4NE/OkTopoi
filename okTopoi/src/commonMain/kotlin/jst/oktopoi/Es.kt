@@ -6,145 +6,172 @@ import jst.oktopoi.TreeMap.MapChange.Cleared
 import jst.oktopoi.TreeMap.MapChange.Put
 import jst.oktopoi.TreeMap.MapChange.Rebuild
 import jst.oktopoi.TreeMap.MapChange.Removed
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
-import kotlinx.io.buffered
-import kotlinx.io.files.FileSystem
-import kotlinx.io.files.Path
-import kotlinx.io.readString
-import kotlinx.io.writeString
-import kotlinx.serialization.KSerializer
-import kotlinx.serialization.json.Json
 import kotlin.math.log
-import kotlin.time.ExperimentalTime
 import co.touchlab.kermit.Logger
-import kotlinx.coroutines.flow.onSubscription
+import kotlinx.coroutines.channels.BufferOverflow
 
 
-class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
+open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
-    private val persisted: PersistedEsInfo<KeyType, ValueType>?
-    private val keySelector: ((ValueType) -> KeyType)?
+    protected val keySelector: ((ValueType) -> KeyType)?
+    
+    // Flow-based change notifications for reactive programming
+    private val _changeFlow = MutableSharedFlow<MapChange<KeyType, ValueType>>(
+        replay = OkTopoiConstants.DEFAULT_CHANGE_FLOW_REPLAY_SIZE, 
+        extraBufferCapacity = OkTopoiConstants.DEFAULT_CHANGE_FLOW_BUFFER_SIZE, 
+        onBufferOverflow = BufferOverflow.SUSPEND
+    )
+    
+    /**
+     * Flow of changes made to this Es.
+     * Useful for reactive programming and implementing persistence.
+     */
+    val changes: SharedFlow<MapChange<KeyType, ValueType>> = _changeFlow.asSharedFlow()
 
     constructor(
-        persisted: PersistedEsInfo<KeyType, ValueType>?,
         keySelector: ((ValueType) -> KeyType)?,
         sortingBy: Comparator<KeyType>,
         secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
     ) : super(sortingBy, secondaryKeys) {
-        this.persisted = persisted
         this.keySelector = keySelector
     }
 
     lateinit var callingClassName: String
     lateinit var propertyName: String
 
-    @OptIn(ExperimentalTime::class)
-    internal fun setup() {
-        if (persisted != null) {
-            runBlockingMultiplatform {
-                try {
-                    val rootDir: Path
-                    if (persisted.rootDir == null) {
-                        rootDir = initDefaultIO.filter { it?.second == persisted.fileSystem }.first()!!.first
-                    } else {
-                        initIO.filter { it?.first == persisted.rootDir && it.second == persisted.fileSystem }
-                            .first()!!
-                        rootDir = persisted.rootDir
-                    }
-
-                    val fileSystem: FileSystem = persisted.fileSystem
-
-                    val dirPath = Path(rootDir, callingClassName, propertyName)
-                    fileSystem.createDirectories(dirPath)
-
-                    val existingFiles = fileSystem.list(dirPath).filter { (fileSystem.metadataOrNull(it)?.size ?: 0) != 0L }
-                    
-                    existingFiles.forEach { file ->
-                        fileSystem.source(file)
-                            .buffered()
-                            .use { source ->
-                                val content = source.readString()
-                                val value = Json.decodeFromString(
-                                    persisted.valueTypeSerializer,
-                                    content
-                                )
-                                val key = keySelector?.invoke(value) ?: Json.decodeFromString(
-                                    persisted.keyTypeSerializer,
-                                    file.name
-                                )
-                                this@Es.put(key, value)
-                            }
-                    }
-
-                    
-                    // Ensure persistence collector is active before setup() completes
-                    val collectorStarted = CompletableDeferred<Unit>()
-                    
-                    this@Es.changes
-                        .onSubscription {
-                            collectorStarted.complete(Unit)
-                        }
-                        .onEach { change ->
-                            try {
-                                fileSystem.createDirectories(dirPath)
-                                when (change) {
-                                    is Put -> {
-                                        val fileName = Json.encodeToString(persisted.keyTypeSerializer, change.key)
-                                        val filePath = Path(dirPath, fileName)
-                                        val content = Json.encodeToString(persisted.valueTypeSerializer, change.value)
-
-                                        fileSystem.sink(filePath)
-                                            .buffered().use {
-                                                it.writeString(content)
-                                            }
-                                    }
-
-                                    is Removed -> {
-                                        val fileName = Json.encodeToString(persisted.keyTypeSerializer, change.key)
-                                        val filePath = Path(dirPath, fileName)
-                                        fileSystem.delete(filePath)
-                                    }
-
-                                    is Cleared -> {
-                                        fileSystem.list(dirPath).forEach { fileSystem.delete(it) }
-                                    }
-
-                                    is Rebuild -> {
-                                        fileSystem.list(dirPath).forEach { fileSystem.delete(it) }
-                                        // Rebuild: Save all current entries
-                                        this@Es.forEach { (key, value) ->
-                                            val fileName = Json.encodeToString(persisted.keyTypeSerializer, key)
-                                            val filePath = Path(dirPath, fileName)
-                                            val content = Json.encodeToString(persisted.valueTypeSerializer, value)
-
-
-                                            fileSystem.sink(filePath)
-                                                .buffered().use {
-                                                    it.writeString(content)
-                                                }
-                                        }
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                Logger.e("OkTopoi-Es", e) { "Error processing change: $change" }
-                            }
-                        }.launchIn(persistCoroutineScope)
-                    
-                    // Wait for collector to start before completing setup
-                    collectorStarted.await()
-
-                } catch (e: Exception) {
-                    Logger.e("OkTopoi-Es", e) { "Error in setup: $e" }
-                }
-            }
+    internal open fun setup() {
+        // No-op for non-persisted Es instances
+        // Overridden by Eps for persistence functionality
+    }
+    
+    /**
+     * Emit a change notification to the flow.
+     */
+    protected fun emitChange(change: MapChange<KeyType, ValueType>) {
+        val success = _changeFlow.tryEmit(change)
+        if (!success) {
+            throw IllegalStateException("Change flow buffer overflow. Consider increasing buffer size or adding .buffer() to your flow consumer.")
         }
+    }
+    
+    // ========================================================================
+    // Override TreeMap methods to add change emission
+    // ========================================================================
+    
+    override fun put(key: KeyType, value: ValueType): ValueType? {
+        val oldValue = super.put(key, value)
+        emitChange(Put(key, value, oldValue != null, oldValue))
+        return oldValue
+    }
+    
+    override fun remove(key: KeyType): ValueType? {
+        val oldValue = super.remove(key)
+        if (oldValue != null) {
+            emitChange(Removed(key, oldValue))
+        }
+        return oldValue
+    }
+    
+    override fun clear() {
+        super.clear()
+        emitChange(Cleared())
+    }
+    
+    // putAll delegates to put(), so it automatically gets change emission
+    
+    // ========================================================================
+    // Override advanced Map methods to add missing change emission
+    // ========================================================================
+    
+    override fun putIfAbsent(key: KeyType, value: ValueType): ValueType? {
+        val oldValue = super.putIfAbsent(key, value)
+        if (oldValue == null) {
+            // Value was inserted
+            emitChange(Put(key, value, false, null))
+        }
+        return oldValue
+    }
+    
+    override fun replace(key: KeyType, value: ValueType): ValueType? {
+        val oldValue = super.replace(key, value)
+        if (oldValue != null) {
+            // Value was replaced
+            emitChange(Put(key, value, true, oldValue))
+        }
+        return oldValue
+    }
+    
+    override fun replace(key: KeyType, oldValue: ValueType, newValue: ValueType): Boolean {
+        val result = super.replace(key, oldValue, newValue)
+        if (result) {
+            // Value was replaced
+            emitChange(Put(key, newValue, true, oldValue))
+        }
+        return result
+    }
+    
+    override fun compute(key: KeyType, remappingFunction: (KeyType, ValueType?) -> ValueType?): ValueType? {
+        val hadKey = containsKey(key)
+        val oldValue = if (hadKey) get(key) else null
+        val result = super.compute(key, remappingFunction)
+        
+        when {
+            hadKey && result == null -> {
+                // Entry was removed
+                emitChange(Removed(key, oldValue!!))
+            }
+            result != null -> {
+                // Entry was added or updated
+                emitChange(Put(key, result, hadKey, oldValue))
+            }
+            // !hadKey && result == null -> no change, no emission
+        }
+        return result
+    }
+    
+    override fun computeIfAbsent(key: KeyType, mappingFunction: (KeyType) -> ValueType?): ValueType? {
+        val hadKey = containsKey(key)
+        val result = super.computeIfAbsent(key, mappingFunction)
+        if (result != null && !hadKey) {
+            // Value was created
+            emitChange(Put(key, result, false, null))
+        }
+        return result
+    }
+    
+    override fun computeIfPresent(key: KeyType, remappingFunction: (KeyType, ValueType) -> ValueType?): ValueType? {
+        val hadKey = containsKey(key)
+        val oldValue = if (hadKey) get(key) else null
+        val result = super.computeIfPresent(key, remappingFunction)
+        
+        if (result != null && hadKey) {
+            // Value was modified
+            emitChange(Put(key, result, true, oldValue))
+        } else if (result == null && hadKey) {
+            // Entry was removed
+            emitChange(Removed(key, oldValue!!))
+        }
+        return result
+    }
+    
+    override fun merge(key: KeyType, value: ValueType, remappingFunction: (ValueType, ValueType) -> ValueType?): ValueType? {
+        val hadKey = containsKey(key)
+        val oldValue = if (hadKey) get(key) else null
+        val result = super.merge(key, value, remappingFunction)
+        
+        if (result != null) {
+            // Value was merged/inserted
+            emitChange(Put(key, result, hadKey, oldValue))
+        } else if (hadKey) {
+            // Entry was removed by merge function returning null
+            emitChange(Removed(key, oldValue!!))
+        }
+        return result
     }
 
     fun asSnapshotStateList(
@@ -259,9 +286,3 @@ class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
 }
 
-data class PersistedEsInfo<KeyType: Any, ValueType: Any>(
-    val keyTypeSerializer: KSerializer<KeyType>,
-    val valueTypeSerializer: KSerializer<ValueType>,
-    val rootDir: Path?,
-    val fileSystem: FileSystem
-)
