@@ -15,6 +15,106 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 
+/**
+ * Persistent reactive collection that extends Es with automatic file-based persistence.
+ *
+ * Eps (\"Elements-Persistent\") adds file system persistence to the reactive collection
+ * functionality provided by the base Es class. Each entry in the collection is persisted
+ * as an individual file, enabling efficient partial updates and crash recovery.
+ *
+ * ## Architecture
+ *
+ * ```
+ * TreeMap (efficient map operations)
+ *   ↓ extends
+ * Es (+ reactive change notifications)
+ *   ↓ extends  
+ * Eps (+ file persistence)  ← You are here
+ *   ↓ extends
+ * Esps (+ bi-directional sync)
+ * ```
+ *
+ * ## Key Features
+ *
+ * - **Per-entry persistence**: Each entry stored as individual file for efficiency
+ * - **Synchronous persistence**: All collection changes trigger immediate synchronous file operations
+ * - **Directory-based storage**: Organized file structure for easy inspection and debugging
+ * - **File-per-entry storage**: Individual entries stored separately for efficient partial updates
+ * - **Reactive persistence**: Change notifications include persistence operations
+ *
+ * ## Persistence Strategy
+ *
+ * - **File-per-entry**: Each key-value pair stored in separate file named by serialized key
+ * - **Directory structure**: `{rootDir}/{className}/{propertyName}/{serializedKey}.json`
+ * - **Atomic operations**: Individual file writes are atomic when supported by filesystem
+ * - **Lazy loading**: Files are loaded during setup(), not on-demand
+ * - **Synchronous I/O**: All file operations performed synchronously using runBlockingMultiplatform
+ *
+ * ## Usage Examples
+ *
+ * ```kotlin
+ * // Basic persistent collection
+ * val users = eps<String, User> { it.id }
+ * users[\"alice\"] = User(\"alice\", \"Engineering\")  // Automatically persisted
+ *
+ * // With secondary indexes and custom storage
+ * val employees = eps<String, Employee>(
+ *     rootDir = Path(\"/app/data\"),
+ *     keySelector = { it.employeeId },
+ *     secondaryKeys = {
+ *         key(\"department\") { it.department }
+ *         key(\"level\") { it.level }
+ *     }
+ * )
+ *
+ * // Reactive UI with persistence
+ * val liveEmployeeList = employees.asSnapshotStateList(
+ *     scope = viewModelScope,
+ *     filter = { it.value.isActive }
+ * )
+ * ```
+ *
+ * ## File Organization
+ *
+ * ```
+ * /app/data/
+ *   └── com.example.UserRepository/
+ *       └── employees/
+ *           ├── \"emp001\".json    # Employee with ID emp001
+ *           ├── \"emp002\".json    # Employee with ID emp002
+ *           └── ...
+ * ```
+ *
+ * ## Performance Characteristics
+ *
+ * - **Memory efficient**: Only active entries kept in memory
+ * - **Incremental persistence**: Only changed entries written to disk
+ * - **Fast startup**: Parallel file loading during initialization
+ * - **Scalable storage**: Linear storage growth with collection size
+ *
+ * ## Error Handling
+ *
+ * - **Setup failures**: Throws PersistenceFailedException if directory setup or ANY file loading fails  
+ * - **All-or-nothing initialization**: If any persisted file is corrupted, entire collection setup fails
+ * - **Runtime write errors**: State changes are rolled back if persistence fails (fail-fast)
+ * - **Individual file benefits**: Runtime operations only affect single files, not entire collection
+ *
+ * ## Thread Safety
+ *
+ * Eps maintains the same thread safety as Es through ReadWriteLock, with additional
+ * persistence coordination:
+ * - Concurrent reads are allowed during persistence operations
+ * - Writes are serialized to prevent file system conflicts
+ * - Synchronous persistence blocks collection operations until files are written
+ *
+ * @param KeyType the type of keys (must be serializable and non-nullable)
+ * @param ValueType the type of values (must be serializable and non-nullable)
+ *
+ * @see Es for the base reactive collection functionality
+ * @see Esps for synchronized persistent collections
+ * @see eps factory function for creation
+ * @throws PersistenceFailedException when persistence setup fails
+ */
 open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
 
     protected val persisted: PersistedEsInfo<KeyType, ValueType>

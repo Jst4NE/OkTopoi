@@ -18,11 +18,84 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 
 /**
- * Persistent E implementation that extends base E with file-based persistence.
- * 
- * This class follows the same architecture pattern as Es/Eps, where persistence
- * concerns are separated into a derived class that overrides state-changing methods
- * to add persistence behavior.
+ * Persistent state container that extends E with automatic file-based persistence.
+ *
+ * Ep (\"Element-Persistent\") adds file system persistence to the reactive state management
+ * provided by the base E class. All state changes are automatically persisted to disk,
+ * and the persisted value is loaded during initialization if available.
+ *
+ * ## Architecture
+ *
+ * ```
+ * E (observable state)
+ *   ↓ extends
+ * Ep (+ file persistence)  ← You are here
+ *   ↓ extends
+ * Esp (+ bi-directional sync)
+ * ```
+ *
+ * ## Key Features
+ *
+ * - **Synchronous persistence**: All state changes trigger immediate synchronous file writes
+ * - **Initialization loading**: Restores persisted values on startup
+ * - **Serialization**: Uses kotlinx-serialization for type-safe persistence
+ * - **Error handling**: Robust error handling with PersistenceFailedException
+ * - **Extensible design**: Designed to be extended by Esp for synchronization
+ *
+ * ## Persistence Behavior
+ *
+ * - **Write-through**: State changes immediately trigger synchronous file writes using runBlockingMultiplatform
+ * - **Read-on-startup**: Persisted values loaded during setup() initialization
+ * - **Atomic operations**: File operations are performed atomically when possible
+ * - **Synchronous I/O**: All file operations block until completion for consistency
+ *
+ * ## Usage Examples
+ *
+ * ```kotlin
+ * // Basic persistent state
+ * val userSettings = ep<UserPreferences> { UserPreferences.default() }
+ * userSettings.value = newPreferences  // Automatically persisted
+ *
+ * // Custom storage location
+ * val appConfig = ep<Configuration>(
+ *     rootDir = Path("/custom/config")
+ * ) { Configuration.default() }
+ *
+ * // Observing changes (includes persisted changes)
+ * lifecycleScope.launch {
+ *     userSettings.collect { settings ->
+ *         updateUI(settings)
+ *     }
+ * }
+ * ```
+ *
+ * ## File Management
+ *
+ * - **File location**: `{rootDir}/{className}.{propertyName}.json`
+ * - **Format**: JSON using kotlinx-serialization
+ * - **Encoding**: UTF-8 text encoding
+ * - **Error handling**: File I/O errors throw PersistenceFailedException
+ *
+ * ## Thread Safety
+ *
+ * Ep maintains the same thread safety guarantees as the base E class, with additional
+ * considerations for file I/O:
+ * - State reads are immediate and thread-safe
+ * - File writes are performed synchronously and block the calling thread
+ * - Multiple concurrent state changes are serialized to prevent file corruption
+ *
+ * ## Error Handling
+ *
+ * - **Setup failures**: Throws PersistenceFailedException during initialization (fail-fast)
+ * - **Write failures**: State changes rolled back + PersistenceFailedException thrown (fail-fast) 
+ * - **Read failures**: Missing/empty files use defaults; corrupted files fail fast with PersistenceFailedException
+ *
+ * @param ValueType the type of value to persist (must be serializable)
+ *
+ * @see E for the base observable state functionality
+ * @see Esp for synchronized persistent state
+ * @see ep factory function for creation
+ * @throws PersistenceFailedException when persistence setup fails
  */
 open class Ep<ValueType : Any?> : E<ValueType> {
 

@@ -14,9 +14,9 @@ package jst.oktopoi
  * 
  * The architecture uses a view-based pattern:
  * - UnsafeTreeMapCore: Thread-unsafe core with all algorithms
- * - SuspendTreeMapView: Suspend-optimized access wrapper
+ * - SuspendTreeMapView: Internal suspend-optimized wrapper (accessed by compiler plugin)
  * - BlockingTreeMapView: Blocking access wrapper for non-suspend contexts
- * - Public API: Delegates to blocking view by default
+ * - Public API: Delegates to blocking view, transparently optimized in suspend contexts
  * 
  * ## Secondary Index Usage Warning
  * 

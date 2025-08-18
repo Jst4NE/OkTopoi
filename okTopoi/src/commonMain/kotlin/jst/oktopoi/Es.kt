@@ -15,7 +15,94 @@ import kotlin.math.log
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.channels.BufferOverflow
 
-
+/**
+ * Reactive observable collection that extends TreeMap with change notifications and UI integrations.
+ *
+ * Es (\"Elements\") provides a high-performance indexed collection with reactive change notifications,
+ * making it ideal for building reactive UIs and implementing persistence layers. It combines the
+ * O(log n) performance of red-black trees with Flow-based reactivity.
+ *
+ * ## Key Features
+ *
+ * - **Reactive changes**: All modifications emit change events via `changes` Flow
+ * - **High performance**: O(log n) operations with secondary index support  
+ * - **UI integration**: Direct conversion to Compose SnapshotStateList
+ * - **Multi-criteria filtering**: Efficient secondary index-based queries
+ * - **Extensible persistence**: Designed to be extended by Eps for file persistence
+ *
+ * ## Architecture
+ *
+ * ```
+ * TreeMap (efficient map operations)
+ *   ↓ extends
+ * Es (+ reactive change notifications)
+ *   ↓ extends  
+ * Eps (+ file persistence)
+ *   ↓ extends
+ * Esps (+ bi-directional sync)
+ * ```
+ *
+ * ## Usage Examples
+ *
+ * ```kotlin
+ * // Basic reactive collection
+ * val users = es<String, User> { it.id }
+ * users[\"alice\"] = User(\"alice\", \"Engineering\", \"Senior\")
+ *
+ * // With secondary indexes for efficient filtering
+ * val employees = es<String, Employee>(
+ *     keySelector = { it.employeeId },
+ *     secondaryKeys = {
+ *         key(\"department\") { it.department }
+ *         key(\"level\") { it.level }
+ *         key(\"location\") { it.office.city }
+ *     }
+ * )
+ *
+ * // Multi-criteria queries (O(log n) per criterion)
+ * val seniorEngineers = employees.getBy(
+ *     \"department\" to \"Engineering\",
+ *     \"level\" to \"Senior\"
+ * )
+ *
+ * // Reactive UI integration
+ * val liveList = employees.asSnapshotStateList(
+ *     scope = viewModelScope,
+ *     filter = { it.value.isActive }
+ * )
+ *
+ * // Observe changes
+ * lifecycleScope.launch {
+ *     employees.changes.collect { change ->
+ *         when (change) {
+ *             is TreeMap.MapChange.Put -> println(\"Added: ${change.key}\")
+ *             is TreeMap.MapChange.Removed -> println(\"Removed: ${change.key}\")
+ *             is TreeMap.MapChange.Cleared -> println(\"Collection cleared\")
+ *             is TreeMap.MapChange.Rebuild -> println(\"Collection rebuilt\")
+ *         }
+ *     }
+ * }
+ * ```
+ *
+ * ## Performance Characteristics
+ *
+ * - **Basic operations**: O(log n) for get/put/remove
+ * - **Secondary index queries**: O(log n) per criterion + O(k) for result set
+ * - **Change emission**: O(1) for most operations
+ * - **UI updates**: Efficient incremental updates to SnapshotStateList
+ *
+ * ## Thread Safety
+ *
+ * Es operations are thread-safe through the underlying TreeMap's ReadWriteLock implementation.
+ * Multiple readers can access concurrently, while writes are exclusive.
+ *
+ * @param KeyType the type of keys (must be non-nullable)
+ * @param ValueType the type of values stored (must be non-nullable)
+ *
+ * @see eps for persistent collections
+ * @see esps for synchronized collections  
+ * @see TreeMap for the underlying map implementation
+ */
 open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
     protected val keySelector: ((ValueType) -> KeyType)?
@@ -178,6 +265,48 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         return result
     }
 
+    /**
+     * Creates a reactive SnapshotStateList that automatically updates when this collection changes.
+     *
+     * This function bridges the gap between OkTopoi's reactive collections and Compose UI,
+     * providing a SnapshotStateList that reflects changes to the underlying Es in real-time.
+     * The list is kept in sync via the `changes` Flow, with efficient incremental updates.
+     *
+     * ## Performance
+     *
+     * - **Initial creation**: O(n log n) if custom comparator provided, O(n) otherwise
+     * - **Updates**: O(log n) for insertions/updates, O(n) for removals (due to linear search)
+     * - **Memory**: Maintains separate list copy optimized for UI rendering
+     *
+     * ## Threading
+     *
+     * The returned list is thread-safe for Compose usage. Updates are applied on the provided
+     * CoroutineScope, which should typically be a UI-scoped scope like `viewModelScope`.
+     *
+     * @param scope CoroutineScope for managing change observation (typically viewModelScope)
+     * @param entryComparator custom comparator for entry ordering (null = use key ordering)
+     * @param filter optional predicate to include/exclude entries from the list
+     * @param initialEntriesProvider custom provider for initial entries (advanced usage)
+     * @return reactive SnapshotStateList synchronized with this collection
+     *
+     * @sample
+     * ```kotlin
+     * // Basic reactive list
+     * val userList = users.asSnapshotStateList(scope = viewModelScope)
+     *
+     * // With filtering
+     * val activeUsers = users.asSnapshotStateList(
+     *     scope = viewModelScope,
+     *     filter = { it.value.isActive }
+     * )
+     *
+     * // With custom sorting
+     * val usersByName = users.asSnapshotStateList(
+     *     scope = viewModelScope,
+     *     entryComparator = compareBy { it.value.name }
+     * )
+     * ```
+     */
     fun asSnapshotStateList(
         scope: CoroutineScope,
         entryComparator: Comparator<Map.Entry<KeyType, ValueType>>? = null,
@@ -243,8 +372,50 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     }
 
     /**
-     * Creates a reactive SnapshotStateList filtered by multiple secondary key criteria with proper O(k) initial lookup.
-     * Uses TreeMap's secondary index intersection for efficient filtering and delegates to base asSnapshotStateList.
+     * Creates a reactive SnapshotStateList filtered by multiple secondary key criteria with efficient O(k) initial lookup.
+     *
+     * This function provides high-performance filtered reactive lists by leveraging secondary indexes.
+     * Instead of scanning all entries, it uses TreeMap's secondary index intersection to find matching
+     * entries in O(log n) time per criterion, then maintains reactivity for the filtered subset.
+     *
+     * ## Performance Advantages
+     *
+     * - **Initial lookup**: O(log n) per criterion vs O(n) for full scan filtering
+     * - **Index intersection**: Efficient set operations on primary keys
+     * - **Reactive updates**: Only relevant changes trigger UI updates
+     * - **Memory efficient**: Indexes store only primary keys, not full objects
+     *
+     * ## Usage Requirements
+     *
+     * - All criteria keys must be defined in the collection's secondary indexes
+     * - Criteria values are compared using equality (== not ===)
+     * - Custom entryComparator is required for this overload
+     *
+     * @param scope CoroutineScope for managing change observation
+     * @param criteria variable number of secondary key criteria as "indexName" to value pairs
+     * @param entryComparator comparator for entry ordering (required for this overload)
+     * @param filter optional additional predicate filter (applied after secondary key filtering)
+     * @return reactive SnapshotStateList with efficient secondary key filtering
+     *
+     * @sample
+     * ```kotlin
+     * // Filter by multiple criteria
+     * val seniorEngineersInNY = employees.asSnapshotStateListBySecondaryKey(
+     *     scope = viewModelScope,
+     *     "department" to "Engineering",
+     *     "level" to "Senior", 
+     *     "location" to "New York",
+     *     entryComparator = compareBy { it.value.name }
+     * )
+     *
+     * // With additional filter
+     * val activeEmployees = employees.asSnapshotStateListBySecondaryKey(
+     *     scope = viewModelScope,
+     *     "department" to "Engineering",
+     *     entryComparator = compareBy { it.value.startDate },
+     *     filter = { it.value.status == "Active" }
+     * )
+     * ```
      */
     fun asSnapshotStateListBySecondaryKey(
         scope: CoroutineScope,
@@ -262,9 +433,47 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     }
 
     /**
-     * Creates a reactive SnapshotStateList filtered by multiple secondary key criteria with proper O(k) initial lookup.
-     * Uses TreeMap's secondary index intersection for efficient filtering and delegates to base asSnapshotStateList.
-     * Automatically creates a comparator that compares by secondary key values in order.
+     * Creates a reactive SnapshotStateList filtered by multiple secondary key criteria with automatic sorting.
+     *
+     * This convenience overload automatically generates a comparator that sorts entries by
+     * the secondary key values in the order they are specified in the criteria. It's ideal
+     * when you want the filtered list sorted by the same criteria used for filtering.
+     *
+     * ## Automatic Sorting Logic
+     *
+     * The generated comparator compares entries by each criterion in order:
+     * 1. Compare by first secondary key value
+     * 2. If equal, compare by second secondary key value  
+     * 3. Continue until a difference is found
+     * 4. If all secondary keys are equal, compare by primary key
+     *
+     * ## Performance & Requirements
+     *
+     * - Same O(log n) per criterion performance as the explicit comparator overload
+     * - All criteria values must implement Comparable
+     * - All criteria keys must exist in secondary indexes
+     *
+     * @param scope CoroutineScope for managing change observation
+     * @param criteria variable number of secondary key criteria with Comparable values
+     * @param filter optional additional predicate filter
+     * @return reactive SnapshotStateList sorted by secondary key values
+     *
+     * @sample
+     * ```kotlin
+     * // Automatic sorting by department, then level, then location
+     * val sortedEmployees = employees.asSnapshotStateListBySecondaryKey(
+     *     scope = viewModelScope,
+     *     "department" to "Engineering",
+     *     "level" to "Senior"
+     * ) // Results sorted by: department, then level, then primary key
+     *
+     * // With additional filtering
+     * val filteredResults = employees.asSnapshotStateListBySecondaryKey(
+     *     scope = viewModelScope,
+     *     "location" to "Seattle",
+     *     filter = { it.value.yearsExperience >= 5 }
+     * )
+     * ```
      */
     fun asSnapshotStateListBySecondaryKey(
         scope: CoroutineScope,
