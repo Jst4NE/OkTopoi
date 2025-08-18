@@ -40,7 +40,7 @@ package jst.oktopoi
  * @param V the type of mapped values
  * @param keyComparator the comparator used to order the keys, or null for natural ordering
  */
-open class TreeMap<K, V>(
+open class TreeMap<K, V> internal constructor(
     keyComparator: Comparator<K> = Comparator { k1, k2 ->
         (k1 as Comparable<K>).compareTo(k2)
     }
@@ -133,26 +133,15 @@ open class TreeMap<K, V>(
         private val treeMap: TreeMap<K, V>
     ) {
         /**
-         * Adds a secondary index for efficient lookups by a derived key.
-         * 
-         * @param indexName unique name for this index
-         * @param keyExtractor function to extract secondary key from values
-         * @return this builder for chaining
-         */
-        fun index(indexName: String, keyExtractor: (V) -> Any?): SecondaryIndexBuilder<K, V> {
-            treeMap.addSecondaryIndex(indexName, keyExtractor)
-            return this
-        }
-        
-        /**
-         * Adds a secondary index using a property name.
+         * Adds a secondary index for efficient lookups by key extraction.
          * 
          * @param indexName unique name for this index
          * @param keyExtractor function to extract secondary key from values
          * @return this builder for chaining
          */
         fun key(indexName: String, keyExtractor: (V) -> Any?): SecondaryIndexBuilder<K, V> {
-            return index(indexName, keyExtractor)
+            treeMap.addSecondaryIndex(indexName, keyExtractor)
+            return this
         }
     }
     
@@ -167,7 +156,7 @@ open class TreeMap<K, V>(
      * }
      * ```
      */
-    constructor(
+    internal constructor(
         keyComparator: Comparator<K> = Comparator { k1, k2 ->
             (k1 as Comparable<K>).compareTo(k2)
         },

@@ -62,7 +62,7 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
 
 
             } catch (e: Exception) {
-                Logger.e("OkTopoi-Eps", e) { "Error in setup: $e" }
+                throw PersistenceFailedException("Failed to initialize collection persistence: ${e.message}", e)
             }
         }
     }

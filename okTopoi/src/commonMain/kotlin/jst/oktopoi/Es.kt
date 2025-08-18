@@ -30,6 +30,10 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     /**
      * Flow of changes made to this Es.
      * Useful for reactive programming and implementing persistence.
+     * 
+     * **Backpressure handling:** This flow has a limited buffer. If consumers are too slow
+     * and the buffer overflows, an exception will be thrown. Slow consumers should add
+     * buffering to their flow chain: `collection.changes.buffer(10000).collect { ... }`
      */
     val changes: SharedFlow<MapChange<KeyType, ValueType>> = _changeFlow.asSharedFlow()
 

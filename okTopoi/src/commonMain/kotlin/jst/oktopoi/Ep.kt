@@ -68,7 +68,7 @@ open class Ep<ValueType : Any?> : E<ValueType> {
                 }
 
             } catch (e: Exception) {
-                Logger.e("OkTopoi-Ep", e) { "Error in Ep.setup: $e" }
+                throw PersistenceFailedException("Failed to initialize persistence: ${e.message}", e)
             }
         }
     }

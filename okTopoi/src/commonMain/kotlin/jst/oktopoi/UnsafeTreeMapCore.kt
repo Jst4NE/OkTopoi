@@ -22,7 +22,7 @@ package jst.oktopoi
  * @param K the type of keys maintained by this tree
  * @param V the type of mapped values
  */
-open class UnsafeTreeMapCore<K, V>(
+open class UnsafeTreeMapCore<K, V> internal constructor(
     protected val keyComparator: Comparator<K>
 ) {
     
@@ -1014,8 +1014,6 @@ open class UnsafeTreeMapCore<K, V>(
      * 
      * @param key key with which the specified value is to be associated
      * @param value value to be associated with the specified key
-     * @param secondaryIndexes map of secondary indexes to update
-     * @param changes list to record changes for observers (optional)
      * @return the previous value associated with the specified key, or null if there was no mapping for the key
      */
     protected fun putIfAbsentUnsafe(key: K, value: V): V? {
@@ -1033,8 +1031,6 @@ open class UnsafeTreeMapCore<K, V>(
      * 
      * @param key key with which the specified value is to be associated
      * @param remappingFunction function to compute a value
-     * @param secondaryIndexes map of secondary indexes to update
-     * @param changes list to record changes for observers (optional)
      * @return the new value associated with the specified key, or null if none
      */
     protected fun computeUnsafe(key: K, remappingFunction: (K, V?) -> V?): V? {
@@ -1060,8 +1056,6 @@ open class UnsafeTreeMapCore<K, V>(
      * 
      * @param key key with which the specified value is to be associated
      * @param mappingFunction function to compute a value
-     * @param secondaryIndexes map of secondary indexes to update
-     * @param changes list to record changes for observers (optional)
      * @return the current (existing or computed) value associated with the specified key, or null if the computed value is null
      */
     protected fun computeIfAbsentUnsafe(key: K, mappingFunction: (K) -> V?): V? {
@@ -1083,8 +1077,6 @@ open class UnsafeTreeMapCore<K, V>(
      * 
      * @param key key with which the specified value is to be associated
      * @param remappingFunction function to compute a value
-     * @param secondaryIndexes map of secondary indexes to update
-     * @param changes list to record changes for observers (optional)
      * @return the new value associated with the specified key, or null if none
      */
     protected fun computeIfPresentUnsafe(key: K, remappingFunction: (K, V) -> V?): V? {
@@ -1111,8 +1103,6 @@ open class UnsafeTreeMapCore<K, V>(
      * @param key key with which the specified value is to be associated
      * @param value the non-null value to be merged with the existing value associated with the key
      * @param remappingFunction function to recompute a value if present
-     * @param secondaryIndexes map of secondary indexes to update
-     * @param changes list to record changes for observers (optional)
      * @return the new value associated with the specified key, or null if no value is associated with the key
      */
     protected fun mergeUnsafe(key: K, value: V, remappingFunction: (V, V) -> V?): V? {
@@ -1143,8 +1133,6 @@ open class UnsafeTreeMapCore<K, V>(
      * 
      * @param key key with which the specified value is associated
      * @param value value to be associated with the specified key
-     * @param secondaryIndexes map of secondary indexes to update
-     * @param changes list to record changes for observers (optional)
      * @return the previous value associated with the specified key, or null if there was no mapping for the key
      */
     protected fun replaceUnsafe(key: K, value: V): V? {
@@ -1162,8 +1150,6 @@ open class UnsafeTreeMapCore<K, V>(
      * @param key key with which the specified value is associated
      * @param oldValue value expected to be associated with the specified key
      * @param newValue value to be associated with the specified key
-     * @param secondaryIndexes map of secondary indexes to update
-     * @param changes list to record changes for observers (optional)
      * @return true if the value was replaced
      */
     protected fun replaceUnsafe(key: K, oldValue: V, newValue: V): Boolean {
@@ -1182,8 +1168,6 @@ open class UnsafeTreeMapCore<K, V>(
      * Copies all of the mappings from the specified map to this map.
      * 
      * @param from mappings to be stored in this map
-     * @param secondaryIndexes map of secondary indexes to update
-     * @param changes list to record changes for observers (optional)
      */
     protected fun putAllUnsafe(from: Map<out K, V>) {
         from.forEach { (key, value) ->
@@ -1256,36 +1240,5 @@ open class UnsafeTreeMapCore<K, V>(
     protected fun tailMapEntriesUnsafe(fromKey: K): List<MapEntry<K, V>> {
         return subMapEntriesUnsafe(fromKey, true, null, true)
     }
-    
-    // ========================================================================
-    // Utility and Debug Methods
-    // ========================================================================
-    
-    
-    /**
-     * Returns a string representation of the tree structure for debugging.
-     */
-    protected fun debugStringUnsafe(): String {
-        if (root == null) return "Empty tree"
-        
-        val sb = StringBuilder()
-        debugPrintNode(root!!, "", true, sb)
-        return sb.toString()
-    }
-    
-    /**
-     * Recursively builds a debug string representation of the tree.
-     */
-    private fun debugPrintNode(node: Node<K, V>, prefix: String, isLast: Boolean, sb: StringBuilder) {
-        sb.append(prefix)
-        sb.append(if (isLast) "└── " else "├── ")
-        sb.append("${node.key}=${node.value} (${node.color.name[0]}, size=${node.size})\n")
-        
-        val children = listOfNotNull(node.left, node.right)
-        children.forEachIndexed { index, child ->
-            val isLastChild = index == children.size - 1
-            val newPrefix = prefix + if (isLast) "    " else "│   "
-            debugPrintNode(child, newPrefix, isLastChild, sb)
-        }
-    }
+
 }
