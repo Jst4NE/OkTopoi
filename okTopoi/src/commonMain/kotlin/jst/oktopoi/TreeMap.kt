@@ -6,7 +6,7 @@ package jst.oktopoi
  * 
  * This implementation provides:
  * - O(log n) performance for all basic operations (get, put, remove)
- * - O(1) secondary index lookups
+ * - O(1) secondary index access per criterion, O(k) for k criteria due to intersection
  * - Thread-safe access through ReadWriteLock
  * - Transparent suspend context optimization (with compiler plugin)
  * - Complete NavigableMap API (firstKey, lastKey, lower/floor/ceiling/higher)
@@ -40,6 +40,7 @@ package jst.oktopoi
  * @param V the type of mapped values
  * @param keyComparator the comparator used to order the keys, or null for natural ordering
  */
+@Suppress("UNCHECKED_CAST")
 open class TreeMap<K, V> internal constructor(
     keyComparator: Comparator<K> = Comparator { k1, k2 ->
         (k1 as Comparable<K>).compareTo(k2)

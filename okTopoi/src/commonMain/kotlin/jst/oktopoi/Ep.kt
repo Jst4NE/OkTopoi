@@ -36,7 +36,7 @@ import kotlinx.coroutines.SupervisorJob
  *
  * ## Key Features
  *
- * - **Synchronous persistence**: All state changes trigger immediate synchronous file writes
+ * - **Blocking persistence**: All state changes block the calling thread until file writes complete
  * - **Initialization loading**: Restores persisted values on startup
  * - **Serialization**: Uses kotlinx-serialization for type-safe persistence
  * - **Error handling**: Robust error handling with PersistenceFailedException
@@ -44,7 +44,7 @@ import kotlinx.coroutines.SupervisorJob
  *
  * ## Persistence Behavior
  *
- * - **Write-through**: State changes immediately trigger synchronous file writes using runBlockingMultiplatform
+ * - **Write-through**: State changes block the caller until file writes complete using runBlockingMultiplatform
  * - **Read-on-startup**: Persisted values loaded during setup() initialization
  * - **Atomic operations**: File operations are performed atomically when possible
  * - **Synchronous I/O**: All file operations block until completion for consistency

@@ -40,7 +40,7 @@ class RunBlockingMultiplatformInliner(
         // Check if this is a runBlockingMultiplatform call
         if (isRunBlockingMultiplatformCall(expression)) {
             // Get the lambda parameter (suspend CoroutineScope.() -> T)
-            val lambdaArg = expression.getValueArgument(0)
+            val lambdaArg = expression.arguments[0]
             if (lambdaArg != null) {
                 // Replace with direct runBlocking call
                 return createRunBlockingCall(lambdaArg, expression)
@@ -92,7 +92,7 @@ class RunBlockingMultiplatformInliner(
             .filterIsInstance<org.jetbrains.kotlin.ir.declarations.IrSimpleFunction>()
             .single { function ->
                 function.name.asString() == "runBlocking" &&
-                function.valueParameters.size == 2 // context + block
+                function.parameters.size == 2 // context + block
             }.symbol
         
         // Use DeclarationIrBuilder for safer IR construction
@@ -100,13 +100,13 @@ class RunBlockingMultiplatformInliner(
         
         return builder.irCall(runBlockingSymbol).apply {
             // Copy type argument (T)
-            putTypeArgument(0, originalCall.getTypeArgument(0))
+            typeArguments[0] = originalCall.typeArguments[0]
             
             // Default context (EmptyCoroutineContext)
-            putValueArgument(0, createEmptyCoroutineContext())
+            arguments[0] = createEmptyCoroutineContext()
             
             // Copy the lambda
-            putValueArgument(1, lambdaArg)
+            arguments[1] = lambdaArg
         }
     }
     

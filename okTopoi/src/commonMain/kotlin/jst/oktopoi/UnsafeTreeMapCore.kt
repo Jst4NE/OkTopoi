@@ -9,7 +9,6 @@ package jst.oktopoi
  * 
  * Performance characteristics:
  * - All basic operations (get, put, remove): O(log n)
- * - Secondary index lookups: O(1) 
  * - Range operations: O(log n + k) where k is the number of elements in range
  * - Space complexity: O(n)
  * 

@@ -107,7 +107,7 @@ class OktopoiTransformer(
 
                 // Find setup() function
                 val setupFunction = resultClass.functions.firstOrNull {
-                    it.name.asString() == "setup" && it.valueParameters.isEmpty()
+                    it.name.asString() == "setup" && it.parameters.isEmpty()
                 } ?: error("Function setup() not found in ${resultClass.name}")
 
                 // Generate: tempVar.setup()
@@ -211,7 +211,7 @@ class TreeMapSuspendTransformer(
         
         // Check if this is a property getter (starts with "get" or has no parameters with return type)
         val isGetter = function.name.asString().startsWith("get") || 
-                      (function.valueParameters.isEmpty() && !function.returnType.isUnit())
+                      (function.parameters.isEmpty() && !function.returnType.isUnit())
         
         if (!isGetter) return false
         

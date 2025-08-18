@@ -28,6 +28,13 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
 import kotlin.time.Duration.Companion.minutes
 
+/**
+ * Internal wrapper for persisted values that includes synchronization timestamp.
+ * Used by Esps to track sync state alongside the actual data.
+ *
+ * @param value The actual stored value (nullable)
+ * @param syncTimestamp Sync state indicator: 0 = synced, >0 = unsynced timestamp, <0 = deleted timestamp
+ */
 @Serializable
 private data class PersistedValueWithSync<T>(
     val value: T?,

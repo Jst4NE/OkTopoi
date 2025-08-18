@@ -275,7 +275,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      * ## Performance
      *
      * - **Initial creation**: O(n log n) if custom comparator provided, O(n) otherwise
-     * - **Updates**: O(log n) for insertions/updates, O(n) for removals (due to linear search)
+     * - **Updates**: O(log n) for insertions/updates, O(log n) for removals (uses binary search)
      * - **Memory**: Maintains separate list copy optimized for UI rendering
      *
      * ## Threading

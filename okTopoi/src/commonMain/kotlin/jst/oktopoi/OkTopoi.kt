@@ -1,5 +1,6 @@
 package jst.oktopoi
 
+import co.touchlab.kermit.Logger
 import jst.oktopoi.TreeMap.SecondaryIndexBuilder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -11,8 +12,6 @@ import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
 import kotlinx.serialization.InternalSerializationApi
 import kotlinx.serialization.serializer
-import co.touchlab.kermit.Logger
-import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Exception thrown when persistence operations fail.
@@ -60,7 +59,7 @@ fun initRootDirIO(initRootDir: Path, fileSystem: FileSystem = SystemFileSystem) 
  * ```
  */
 inline fun <reified ValueType : Any?> e(noinline defaultValue: (() -> ValueType?)? = null): E<ValueType> {
-    return E<ValueType>(
+    return E(
         observing = null,
         defaultValue = defaultValue
     )
@@ -155,7 +154,7 @@ inline fun <reified ValueType : Any?> ep(
     fileSystem: FileSystem = SystemFileSystem,
     noinline defaultValue: (() -> ValueType?)? = null
 ): Ep<ValueType> {
-    return Ep<ValueType>(
+    return Ep(
         persisted = PersistedEInfo(
             serializer<ValueType?>(),
             rootDir,
@@ -213,9 +212,9 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> es(
     noinline keySelector: ((ValueType) -> KeyType)? = null,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Es<KeyType, ValueType> {
-    return Es<KeyType, ValueType>(
+    return Es(
         keySelector = keySelector,
-        sortingBy = Comparator { k1, k2 -> k1.compareTo(k2) },
+        sortingBy = { k1, k2 -> k1.compareTo(k2) },
         secondaryKeys = secondaryKeys
     )
 }
@@ -271,7 +270,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> es(
     comparator: Comparator<KeyType>,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Es<KeyType, ValueType> {
-    return Es<KeyType, ValueType>(
+    return Es(
         keySelector = keySelector,
         sortingBy = comparator,
         secondaryKeys = secondaryKeys
@@ -308,7 +307,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
     noinline keySelector: ((ValueType) -> KeyType)? = null,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Eps<KeyType, ValueType> {
-    return Eps<KeyType, ValueType>(
+    return Eps(
         persisted = PersistedEsInfo(
             serializer<KeyType>(),
             serializer<ValueType>(),
@@ -316,7 +315,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
             fileSystem
         ),
         keySelector = keySelector,
-        sortingBy = Comparator { k1, k2 -> k1.compareTo(k2) },
+        sortingBy = { k1, k2 -> k1.compareTo(k2) },
         secondaryKeys = secondaryKeys,
         persistScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     )
@@ -338,7 +337,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
  * @param rootDir root directory for persistence files (null = use default from initDefaultIO)
  * @param fileSystem file system implementation to use (default: SystemFileSystem)
  * @param keySelector function to extract keys from values, or null for manual key assignment
- * @param comparator custom comparator for key ordering
+ * @param sortingBy custom comparator for key ordering
  * @param secondaryKeys configuration block for secondary indexes
  * 
  * @see initDefaultIO to configure default storage location
@@ -354,7 +353,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> eps(
     sortingBy: Comparator<KeyType>,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Eps<KeyType, ValueType> {
-    return Eps<KeyType, ValueType>(
+    return Eps(
         persisted = PersistedEsInfo(
             serializer<KeyType>(),
             serializer<ValueType>(),
@@ -540,7 +539,7 @@ inline fun <reified ValueType : Any?> esp(
     syncActive: Flow<Boolean> = MutableStateFlow(true),
     syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 ): Esp<ValueType> {
-    return Esp<ValueType>(
+    return Esp(
         persisted = PersistedEInfo(
             serializer<ValueType?>(),
             rootDir,
@@ -564,7 +563,7 @@ inline fun <reified ValueType : Any?> CoroutineScope.esp(
     noinline outgoingSync: suspend (String, ValueType?, Long) -> Unit,
     syncActive: Flow<Boolean> = MutableStateFlow(true)
 ): Esp<ValueType> {
-    return Esp<ValueType>(
+    return Esp(
         persisted = PersistedEInfo(
             serializer<ValueType?>(),
             rootDir,
@@ -585,7 +584,7 @@ inline fun <reified ValueType : Any?> CoroutineScope.ep(
     fileSystem: FileSystem = SystemFileSystem,
     noinline defaultValue: (() -> ValueType?)? = null
 ): Ep<ValueType> {
-    return Ep<ValueType>(
+    return Ep(
         persisted = PersistedEInfo(
             serializer<ValueType?>(),
             rootDir,
@@ -604,7 +603,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> Coro
     noinline keySelector: ((ValueType) -> KeyType)? = null,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Eps<KeyType, ValueType> {
-    return Eps<KeyType, ValueType>(
+    return Eps(
         persisted = PersistedEsInfo(
             serializer<KeyType>(),
             serializer<ValueType>(),
@@ -612,7 +611,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> Coro
             fileSystem
         ),
         keySelector = keySelector,
-        sortingBy = Comparator { k1, k2 -> k1.compareTo(k2) },
+        sortingBy = { k1, k2 -> k1.compareTo(k2) },
         secondaryKeys = secondaryKeys,
         persistScope = this
     )
@@ -626,7 +625,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> CoroutineScope.eps(
     sortingBy: Comparator<KeyType>,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Eps<KeyType, ValueType> {
-    return Eps<KeyType, ValueType>(
+    return Eps(
         persisted = PersistedEsInfo(
             serializer<KeyType>(),
             serializer<ValueType>(),
@@ -647,12 +646,12 @@ inline fun <reified KeyType : Any, reified ValueType : Any> CoroutineScope.eps(
  * Returns a high-performance TreeMap with O(log n) operations and secondary indexing.
  */
 fun <K : Comparable<K>, V : Any> treeMap(
-    configure: TreeMap.SecondaryIndexBuilder<K, V>.() -> Unit = {}
+    configure: SecondaryIndexBuilder<K, V>.() -> Unit = {}
 ): TreeMap<K, V> {
     return TreeMap<K, V>(
         keyComparator = compareBy { it }
     ).apply {
-        TreeMap.SecondaryIndexBuilder(this).configure()
+        SecondaryIndexBuilder(this).configure()
     }
 }
 
@@ -662,12 +661,12 @@ fun <K : Comparable<K>, V : Any> treeMap(
  */
 fun <K : Any, V : Any> treeMap(
     comparator: Comparator<K>,
-    configure: TreeMap.SecondaryIndexBuilder<K, V>.() -> Unit = {}
+    configure: SecondaryIndexBuilder<K, V>.() -> Unit = {}
 ): TreeMap<K, V> {
     return TreeMap<K, V>(
         keyComparator = comparator
     ).apply {
-        TreeMap.SecondaryIndexBuilder(this).configure()
+        SecondaryIndexBuilder(this).configure()
     }
 }
 

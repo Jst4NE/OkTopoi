@@ -27,7 +27,7 @@ import kotlin.coroutines.resume
  *
  * ## Performance Characteristics
  *
- * - **Lock-free reads**: Read acquisition uses atomic operations for minimal overhead
+ * - **Mutex-protected reads**: Read acquisition uses mutex to ensure thread safety
  * - **Optimized writes**: Writers yield briefly before suspending, optimizing for short read operations
  * - **Suspension-based**: No thread blocking - uses coroutine suspension for waiting
  * - **Cancellation-safe**: Properly handles coroutine cancellation during lock acquisition
@@ -76,7 +76,7 @@ class ReadWriteLock {
      *
      * @param block the suspend function to execute under read lock
      * @return the result of executing the block
-     * @throws CancellationException if the calling coroutine is cancelled
+     * @throws kotlin.coroutines.cancellation.CancellationException if the calling coroutine is cancelled
      */
     suspend fun <T> withReadLock(block: suspend () -> T): T {
         mutex.withLock { readerCount.addAndFetch(1) }
@@ -101,7 +101,7 @@ class ReadWriteLock {
      *
      * @param block the suspend function to execute under write lock
      * @return the result of executing the block
-     * @throws CancellationException if the calling coroutine is cancelled
+     * @throws kotlin.coroutines.cancellation.CancellationException if the calling coroutine is cancelled
      */
     suspend fun <T> withWriteLock(block: suspend () -> T): T {
         mutex.withLock {
@@ -111,7 +111,7 @@ class ReadWriteLock {
                     yields++
                     yield()
                 } else{
-                    suspendCancellableCoroutine<Unit> { continuation ->
+                    suspendCancellableCoroutine { continuation ->
                         waitingWriter.store(continuation)
                         continuation.invokeOnCancellation {
                             waitingWriter.store(null)

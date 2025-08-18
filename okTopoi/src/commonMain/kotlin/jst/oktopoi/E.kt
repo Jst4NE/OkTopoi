@@ -83,8 +83,6 @@ import kotlinx.coroutines.launch
 open class E<ValueType : Any?>(
     private val observing: StateFlow<ValueType>?,
     val defaultValue: (() -> ValueType?)?
-    private val observing: StateFlow<ValueType>?,
-    val defaultValue: (() -> ValueType?)?
 ) : MutableStateFlow<ValueType?> {
 
     private val state: MutableStateFlow<ValueType?> = MutableStateFlow(defaultValue?.invoke())
