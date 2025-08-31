@@ -43,7 +43,7 @@ private data class PersistedValueWithSyncEsp<T>(
  * Architecture: E -> Ep -> Esp (state -> persist -> sync)
  */
 @OptIn(ExperimentalTime::class, ExperimentalCoroutinesApi::class)
-class Esp<ValueType : Any?> : Ep<ValueType> {
+open class Esp<ValueType : Any?> : Ep<ValueType> {
 
     private var syncTimestamp: Long = 0L // Current sync timestamp (0 = synced, >0 = needs sync)
     private val syncTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1) // Triggers sync flow

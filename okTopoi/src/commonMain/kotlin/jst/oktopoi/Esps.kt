@@ -23,10 +23,8 @@ import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
-import kotlin.time.Duration.Companion.minutes
 
 /**
  * Internal wrapper for persisted values that includes synchronization timestamp.
@@ -42,7 +40,7 @@ private data class PersistedValueWithSync<T>(
 )
 
 @OptIn(ExperimentalTime::class, ExperimentalCoroutinesApi::class)
-class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
+open class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
 
     private val unsyncedKeysMap: MutableMap<KeyType, Long> = mutableMapOf() // Keys that need syncing (timestamp)
     private val syncTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1) // Triggers sync flow
@@ -60,14 +58,13 @@ class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
 
     constructor(
         persisted: PersistedEsInfo<KeyType, ValueType>,
-        keySelector: ((ValueType) -> KeyType)?,
         sortingBy: Comparator<KeyType>,
         secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
         incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
         outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit,
         syncActive: Flow<Boolean> = MutableStateFlow(true),
         syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    ) : super(persisted, keySelector, sortingBy, secondaryKeys) {
+    ) : super(persisted, sortingBy, secondaryKeys) {
         this.incomingSync = incomingSync
         this.outgoingSync = outgoingSync
         this.syncActive = syncActive
@@ -347,6 +344,13 @@ class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
                 syncTrigger.tryEmit(Unit)
             }
             return result
+        }
+    }
+
+    fun syncEntry(key: KeyType) {
+        synchronized(lock) {
+            unsyncedKeysMap[key] = Clock.System.now().toEpochMilliseconds()
+            syncTrigger.tryEmit(Unit)
         }
     }
 

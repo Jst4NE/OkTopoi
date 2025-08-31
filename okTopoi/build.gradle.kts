@@ -55,17 +55,19 @@ kotlin {
     sourceSets {
         commonMain {
             dependencies {
-                api(libs.kotlinx.coroutines.core)
+                implementation(libs.kotlinx.coroutines.core)
                 // JSON serialization library, works with the Kotlin serialization plugin.
-                api(libs.kotlinx.serialization.json)
+                implementation(libs.kotlinx.serialization.json)
 
                 implementation(libs.atomicfu)
 
                 api(libs.kotlinx.io.core)
 
                 api(compose.runtime)
+                api(libs.lifecycle.runtime.compose)
 
                 implementation(libs.kermit)
+
 
                 //put your multiplatform dependencies here
             }

@@ -24,9 +24,10 @@ class OktopoiIrGenerationExtension : IrGenerationExtension {
         pluginContext: IrPluginContext
     ) {
         // Apply all transformers: existing functionality + TreeMap suspend transformations + runBlockingMultiplatform inlining
-        moduleFragment.transform(OktopoiTransformer(pluginContext), null)
-        moduleFragment.transform(TreeMapSuspendTransformer(pluginContext), null)
-        moduleFragment.transform(RunBlockingMultiplatformInliner(pluginContext), null)
+        moduleFragment
+            .transform(OktopoiTransformer(pluginContext), null)
+            .transform(TreeMapSuspendTransformer(pluginContext), null)
+            .transform(RunBlockingMultiplatformInliner(pluginContext), null)
     }
 }
 
@@ -79,35 +80,35 @@ class OktopoiTransformer(
                 val resultClass = call.type.classOrNull?.owner
                     ?: error("Cannot find class for type ${call.type}")
 
-                // Find the fields in the actual class
+                // Find the property setters in the actual class
 
                 val callingClassNameProperty: IrProperty = resultClass.properties.firstOrNull {
                     it.name.asString() == "callingClassName"
                 } ?: error("Property callingClassName not found in ${resultClass.name}")
-                val callingClassNameField = callingClassNameProperty.backingField ?: error("Backing field not found for property ${callingClassNameProperty.name}")
+                val callingClassNameSetter = callingClassNameProperty.setter ?: error("Setter not found for property ${callingClassNameProperty.name}")
 
                 val propertyNameProperty: IrProperty = resultClass.properties.firstOrNull {
                     it.name.asString() == "propertyName"
                 } ?: error("Property propertyName not found in ${resultClass.name}")
-                val propertyNameField = propertyNameProperty.backingField ?: error("Backing field not found for property ${propertyNameProperty.name}")
+                val propertyNameSetter = propertyNameProperty.setter ?: error("Setter not found for property ${propertyNameProperty.name}")
 
                 // Generate: tempVar.callingClassName = "ClassName"
-                +irSetField(
-                    irGet(tempVar),
-                    callingClassNameField,
-                    irString(className)
-                )
+                val callingParam = callingClassNameSetter.parameters.first { it.kind == IrParameterKind.Regular }
+                +irCall(callingClassNameSetter).apply {
+                    dispatchReceiver = irGet(tempVar)
+                    arguments[callingParam.indexInParameters] = irString(className)
+                }
 
                 // Generate: tempVar.propertyName = "propertyName"
-                +irSetField(
-                    irGet(tempVar),
-                    propertyNameField,
-                    irString(propertyName)
-                )
+                val propertyParam = propertyNameSetter.parameters.first { it.kind == IrParameterKind.Regular }
+                +irCall(propertyNameSetter).apply {
+                    dispatchReceiver = irGet(tempVar)
+                    arguments[propertyParam.indexInParameters] = irString(propertyName)
+                }
 
                 // Find setup() function
                 val setupFunction = resultClass.functions.firstOrNull {
-                    it.name.asString() == "setup" && it.parameters.isEmpty()
+                    it.name.asString() == "setup" && it.parameters.size == 1 // Only 'this' parameter
                 } ?: error("Function setup() not found in ${resultClass.name}")
 
                 // Generate: tempVar.setup()

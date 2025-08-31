@@ -10,7 +10,6 @@ import kotlinx.io.writeString
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
 import kotlin.time.ExperimentalTime
-import co.touchlab.kermit.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -60,7 +59,6 @@ import kotlinx.coroutines.SupervisorJob
  * // With secondary indexes and custom storage
  * val employees = eps<String, Employee>(
  *     rootDir = Path(\"/app/data\"),
- *     keySelector = { it.employeeId },
  *     secondaryKeys = {
  *         key(\"department\") { it.department }
  *         key(\"level\") { it.level }
@@ -124,11 +122,10 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
 
     constructor(
         persisted: PersistedEsInfo<KeyType, ValueType>,
-        keySelector: ((ValueType) -> KeyType)?,
         sortingBy: Comparator<KeyType>,
         secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
         persistScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    ) : super(keySelector, sortingBy, secondaryKeys) {
+    ) : super(sortingBy, secondaryKeys) {
         this.persisted = persisted
         this.persistScope = persistScope
     }
@@ -249,7 +246,7 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
             persisted.valueTypeSerializer,
             string
         )
-        val key = keySelector?.invoke(value) ?: Json.decodeFromString(
+        val key = Json.decodeFromString(
             persisted.keyTypeSerializer,
             fileName
         )

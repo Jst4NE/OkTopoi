@@ -106,7 +106,6 @@ inline fun <reified ValueType : Any?> e(noinline defaultValue: (() -> ValueType?
  * 
  * // Collection with custom ordering + persistence
  * val tasks = eps<Task, TaskInfo>(
- *     keySelector = { it.task },
  *     comparator = compareBy { it.priority }
  * )
  * ```
@@ -176,7 +175,6 @@ inline fun <reified ValueType : Any?> ep(
  * 
  * @param KeyType the key type (must implement Comparable for natural ordering)
  * @param ValueType the value type stored in the collection
- * @param keySelector function to extract keys from values (null = values used directly as keys)
  * @param secondaryKeys configuration block to define secondary indexes for fast filtering
  * @return observable collection with efficient operations and reactive change notifications
  * 
@@ -187,7 +185,6 @@ inline fun <reified ValueType : Any?> ep(
  * 
  * // With secondary indexes for fast filtering
  * val employees = es<String, Employee>(
- *     keySelector = { it.employeeId },
  *     secondaryKeys = {
  *         key("department") { it.department }
  *         key("level") { it.level }
@@ -209,11 +206,9 @@ inline fun <reified ValueType : Any?> ep(
  * @see esps for synchronized collections
  */
 inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> es(
-    noinline keySelector: ((ValueType) -> KeyType)? = null,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Es<KeyType, ValueType> {
     return Es(
-        keySelector = keySelector,
         sortingBy = { k1, k2 -> k1.compareTo(k2) },
         secondaryKeys = secondaryKeys
     )
@@ -229,7 +224,6 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> es(
  * 
  * @param KeyType the key type (can be any type, doesn't need to be Comparable)
  * @param ValueType the value type stored in the collection
- * @param keySelector function to extract keys from values (null = values used directly as keys)
  * @param comparator custom comparator for key ordering
  * @param secondaryKeys configuration block to define secondary indexes for fast filtering
  * @return observable collection with efficient operations and reactive change notifications
@@ -238,19 +232,16 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> es(
  * ```kotlin
  * // Custom object keys with specific ordering
  * val tasksByPriority = es<Task, TaskDetails>(
- *     keySelector = { it.task },
  *     comparator = compareBy<Task> { it.priority }.thenBy { it.dueDate }
  * )
  * 
  * // Reverse alphabetical ordering for strings
  * val reverseUsers = es<String, User>(
- *     keySelector = { it.name },
  *     comparator = compareByDescending { it }
  * )
  * 
  * // Complex multi-criteria sorting
  * val products = es<Product, ProductInfo>(
- *     keySelector = { it.product },
  *     comparator = compareBy<Product> { it.category }
  *         .thenBy { it.price }
  *         .thenBy { it.name },
@@ -266,12 +257,10 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> es(
  * @see esps for synchronized collections
  */
 inline fun <reified KeyType : Any, reified ValueType : Any> es(
-    noinline keySelector: ((ValueType) -> KeyType)? = null,
     comparator: Comparator<KeyType>,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Es<KeyType, ValueType> {
     return Es(
-        keySelector = keySelector,
         sortingBy = comparator,
         secondaryKeys = secondaryKeys
     )
@@ -292,7 +281,6 @@ inline fun <reified KeyType : Any, reified ValueType : Any> es(
  * @param ValueType the type of values to store
  * @param rootDir root directory for persistence files (null = use default from initDefaultIO)
  * @param fileSystem file system implementation to use (default: SystemFileSystem)
- * @param keySelector function to extract keys from values, or null for manual key assignment
  * @param secondaryKeys configuration block for secondary indexes
  * 
  * @see initDefaultIO to configure default storage location
@@ -304,7 +292,6 @@ inline fun <reified KeyType : Any, reified ValueType : Any> es(
 inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
-    noinline keySelector: ((ValueType) -> KeyType)? = null,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Eps<KeyType, ValueType> {
     return Eps(
@@ -314,7 +301,6 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
             rootDir,
             fileSystem
         ),
-        keySelector = keySelector,
         sortingBy = { k1, k2 -> k1.compareTo(k2) },
         secondaryKeys = secondaryKeys,
         persistScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -336,7 +322,6 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
  * @param ValueType the type of values to store  
  * @param rootDir root directory for persistence files (null = use default from initDefaultIO)
  * @param fileSystem file system implementation to use (default: SystemFileSystem)
- * @param keySelector function to extract keys from values, or null for manual key assignment
  * @param sortingBy custom comparator for key ordering
  * @param secondaryKeys configuration block for secondary indexes
  * 
@@ -349,7 +334,6 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
 inline fun <reified KeyType : Any, reified ValueType : Any> eps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
-    noinline keySelector: ((ValueType) -> KeyType)? = null,
     sortingBy: Comparator<KeyType>,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Eps<KeyType, ValueType> {
@@ -360,7 +344,6 @@ inline fun <reified KeyType : Any, reified ValueType : Any> eps(
             rootDir,
             fileSystem
         ),
-        keySelector = keySelector,
         sortingBy = sortingBy,
         secondaryKeys = secondaryKeys,
         persistScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -382,7 +365,6 @@ inline fun <reified KeyType : Any, reified ValueType : Any> eps(
  * @param ValueType the type of values to store
  * @param rootDir root directory for persistence files (null = use default from initDefaultIO)
  * @param fileSystem file system implementation to use (default: SystemFileSystem)
- * @param keySelector function to extract keys from values, or null for manual key assignment
  * @param secondaryKeys configuration block for secondary indexes
  * @param incomingSync flow of incoming changes from remote sources
  * @param outgoingSync function to send local changes to remote sources
@@ -398,7 +380,6 @@ inline fun <reified KeyType : Any, reified ValueType : Any> eps(
 inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> esps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
-    noinline keySelector: ((ValueType) -> KeyType)? = null,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
     incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
     noinline outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit,
@@ -412,7 +393,6 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> esps
             rootDir,
             fileSystem
         ),
-        keySelector = keySelector,
         sortingBy = { k1, k2 -> k1.compareTo(k2) },
         secondaryKeys = secondaryKeys,
         incomingSync = incomingSync,
@@ -426,7 +406,6 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> esps
 inline fun <reified KeyType : Any, reified ValueType : Any> esps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
-    noinline keySelector: ((ValueType) -> KeyType)? = null,
     sortingBy: Comparator<KeyType>,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
     incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
@@ -441,7 +420,6 @@ inline fun <reified KeyType : Any, reified ValueType : Any> esps(
             rootDir,
             fileSystem
         ),
-        keySelector = keySelector,
         sortingBy = sortingBy,
         secondaryKeys = secondaryKeys,
         incomingSync = incomingSync,
@@ -455,7 +433,6 @@ inline fun <reified KeyType : Any, reified ValueType : Any> esps(
 inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> CoroutineScope.esps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
-    noinline keySelector: ((ValueType) -> KeyType)? = null,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
     incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
     noinline outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit,
@@ -468,8 +445,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> Coro
             rootDir,
             fileSystem
         ),
-        keySelector = keySelector,
-        sortingBy = { k1, k2 -> k1.compareTo(k2) },
+        sortingBy = naturalOrder(),
         secondaryKeys = secondaryKeys,
         incomingSync = incomingSync,
         outgoingSync = outgoingSync,
@@ -482,7 +458,6 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> Coro
 inline fun <reified KeyType : Any, reified ValueType : Any> CoroutineScope.esps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
-    noinline keySelector: ((ValueType) -> KeyType)? = null,
     sortingBy: Comparator<KeyType>,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
     incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
@@ -496,7 +471,6 @@ inline fun <reified KeyType : Any, reified ValueType : Any> CoroutineScope.esps(
             rootDir,
             fileSystem
         ),
-        keySelector = keySelector,
         sortingBy = sortingBy,
         secondaryKeys = secondaryKeys,
         incomingSync = incomingSync,
@@ -600,7 +574,6 @@ inline fun <reified ValueType : Any?> CoroutineScope.ep(
 inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> CoroutineScope.eps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
-    noinline keySelector: ((ValueType) -> KeyType)? = null,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Eps<KeyType, ValueType> {
     return Eps(
@@ -610,7 +583,6 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> Coro
             rootDir,
             fileSystem
         ),
-        keySelector = keySelector,
         sortingBy = { k1, k2 -> k1.compareTo(k2) },
         secondaryKeys = secondaryKeys,
         persistScope = this
@@ -621,7 +593,6 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> Coro
 inline fun <reified KeyType : Any, reified ValueType : Any> CoroutineScope.eps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
-    noinline keySelector: ((ValueType) -> KeyType)? = null,
     sortingBy: Comparator<KeyType>,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Eps<KeyType, ValueType> {
@@ -632,7 +603,6 @@ inline fun <reified KeyType : Any, reified ValueType : Any> CoroutineScope.eps(
             rootDir,
             fileSystem
         ),
-        keySelector = keySelector,
         sortingBy = sortingBy,
         secondaryKeys = secondaryKeys,
         persistScope = this
@@ -649,7 +619,7 @@ fun <K : Comparable<K>, V : Any> treeMap(
     configure: SecondaryIndexBuilder<K, V>.() -> Unit = {}
 ): TreeMap<K, V> {
     return TreeMap<K, V>(
-        keyComparator = compareBy { it }
+        keyComparator = naturalOrder()
     ).apply {
         SecondaryIndexBuilder(this).configure()
     }

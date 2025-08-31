@@ -31,29 +31,6 @@ object OkTopoiConstants {
     const val DEFAULT_CHANGE_FLOW_BUFFER_SIZE = 2048
     
     /**
-     * Default replay cache size for change flows.
-     * Set to 0 to avoid replaying old events to new subscribers.
-     * 
-     * A replay cache of 0 means new subscribers only receive future changes,
-     * not historical ones. This prevents unexpected state synchronization issues
-     * when components subscribe at different times.
-     * 
-     * ```kotlin
-     * // With replay = 0 (default):
-     * val collection = es<String, User> { it.id }
-     * collection["alice"] = alice  // Event 1
-     * 
-     * lifecycleScope.launch {
-     *     collection.changes.collect { change ->
-     *         // This subscriber only sees events from this point forward
-     *         // Event 1 above is NOT replayed
-     *     }
-     * }
-     * ```
-     */
-    const val DEFAULT_CHANGE_FLOW_REPLAY_SIZE = 0
-    
-    /**
      * Default sync interval for Esp/Esps periodic synchronization.
      * Syncing occurs on data changes AND at this periodic interval.
      * 

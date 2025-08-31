@@ -1,19 +1,23 @@
 package jst.oktopoi
 
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.toMutableStateList
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import jst.oktopoi.TreeMap.MapChange.Cleared
 import jst.oktopoi.TreeMap.MapChange.Put
 import jst.oktopoi.TreeMap.MapChange.Rebuild
 import jst.oktopoi.TreeMap.MapChange.Removed
-import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.launch
-import kotlin.math.log
-import co.touchlab.kermit.Logger
-import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.onStart
 
 /**
  * Reactive observable collection that extends TreeMap with change notifications and UI integrations.
@@ -51,7 +55,6 @@ import kotlinx.coroutines.channels.BufferOverflow
  *
  * // With secondary indexes for efficient filtering
  * val employees = es<String, Employee>(
- *     keySelector = { it.employeeId },
  *     secondaryKeys = {
  *         key(\"department\") { it.department }
  *         key(\"level\") { it.level }
@@ -67,7 +70,6 @@ import kotlinx.coroutines.channels.BufferOverflow
  *
  * // Reactive UI integration
  * val liveList = employees.asSnapshotStateList(
- *     scope = viewModelScope,
  *     filter = { it.value.isActive }
  * )
  *
@@ -105,11 +107,9 @@ import kotlinx.coroutines.channels.BufferOverflow
  */
 open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
-    protected val keySelector: ((ValueType) -> KeyType)?
-    
     // Flow-based change notifications for reactive programming
     private val _changeFlow = MutableSharedFlow<MapChange<KeyType, ValueType>>(
-        replay = OkTopoiConstants.DEFAULT_CHANGE_FLOW_REPLAY_SIZE, 
+        replay = 0,
         extraBufferCapacity = OkTopoiConstants.DEFAULT_CHANGE_FLOW_BUFFER_SIZE, 
         onBufferOverflow = BufferOverflow.SUSPEND
     )
@@ -125,12 +125,9 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     val changes: SharedFlow<MapChange<KeyType, ValueType>> = _changeFlow.asSharedFlow()
 
     constructor(
-        keySelector: ((ValueType) -> KeyType)?,
         sortingBy: Comparator<KeyType>,
         secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
-    ) : super(sortingBy, secondaryKeys) {
-        this.keySelector = keySelector
-    }
+    ) : super(sortingBy, secondaryKeys)
 
     lateinit var callingClassName: String
     lateinit var propertyName: String
@@ -270,52 +267,53 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      *
      * This function bridges the gap between OkTopoi's reactive collections and Compose UI,
      * providing a SnapshotStateList that reflects changes to the underlying Es in real-time.
-     * The list is kept in sync via the `changes` Flow, with efficient incremental updates.
+     * The list is kept in sync via the `changes` Flow with efficient incremental updates and
+     * lifecycle awareness.
      *
      * ## Performance
      *
-     * - **Initial creation**: O(n log n) if custom comparator provided, O(n) otherwise
-     * - **Updates**: O(log n) for insertions/updates, O(log n) for removals (uses binary search)
-     * - **Memory**: Maintains separate list copy optimized for UI rendering
+     * - Initial creation: O(n log n) if custom comparator provided, O(n) otherwise
+     * - Updates: O(log n) for insertions/updates, O(log n) for removals (uses binary search)
+     * - Memory: Maintains separate list copy optimized for UI rendering
      *
-     * ## Threading
+     * ## Lifecycle & Threading
      *
-     * The returned list is thread-safe for Compose usage. Updates are applied on the provided
-     * CoroutineScope, which should typically be a UI-scoped scope like `viewModelScope`.
+     * - Collection is lifecycle-aware and runs only while the provided lifecycleOwner is at least
+     *   `minActiveState` (defaults to STARTED). On each (re)subscription, a Rebuild event is injected
+     *   to reconcile any missed changes while the lifecycle was inactive.
+     * - Mutations to the returned list occur on the main thread.
      *
-     * @param scope CoroutineScope for managing change observation (typically viewModelScope)
      * @param entryComparator custom comparator for entry ordering (null = use key ordering)
      * @param filter optional predicate to include/exclude entries from the list
      * @param initialEntriesProvider custom provider for initial entries (advanced usage)
+     * @param lifecycleOwner owner that controls collection lifecycle (defaults to LocalLifecycleOwner)
+     * @param minActiveState minimum lifecycle state required for collection (defaults to STARTED)
      * @return reactive SnapshotStateList synchronized with this collection
      *
      * @sample
      * ```kotlin
      * // Basic reactive list
-     * val userList = users.asSnapshotStateList(scope = viewModelScope)
+     * val userList = users.asSnapshotStateList()
      *
      * // With filtering
      * val activeUsers = users.asSnapshotStateList(
-     *     scope = viewModelScope,
      *     filter = { it.value.isActive }
      * )
      *
      * // With custom sorting
      * val usersByName = users.asSnapshotStateList(
-     *     scope = viewModelScope,
      *     entryComparator = compareBy { it.value.name }
      * )
      * ```
      */
+    @Composable
     fun asSnapshotStateList(
-        scope: CoroutineScope,
         entryComparator: Comparator<Map.Entry<KeyType, ValueType>>? = null,
         filter: ((Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
         initialEntriesProvider: (() -> Collection<Map.Entry<KeyType, ValueType>>) = { entries },
+        lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
+        minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, ValueType>> {
-        
-        // Create comparator with default fallback
-        val entryCmp = entryComparator ?: Comparator { e1, e2, -> keyComparator.compare(e1.key, e2.key) }
 
         fun getSortedEntries(): Collection<Map.Entry<KeyType, ValueType>> {
             // Use efficient provider if available, otherwise default to all entries
@@ -332,46 +330,89 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             }
         }
 
-        val list = getSortedEntries().toMutableStateList()
+        // Stable list identity across recompositions
+        val list = remember { getSortedEntries().toMutableStateList() }
+
+        // Create comparator with default fallback
+        val entryCmp = entryComparator ?: Comparator { e1, e2, -> keyComparator.compare(e1.key, e2.key) }
 
         fun findIndex(key: KeyType, value: ValueType, returnInsertionPoint: Boolean = true): Int {
-            return BinarySearchUtils.findIndexForMapEntries(list, key, value, entryCmp, returnInsertionPoint)
+
+            val targetEntry = MapEntry(key, value)
+            var low = 0
+            var high = list.size
+
+            // Binary search for the general position
+            while (low < high) {
+                val mid = (low + high) / 2
+                val midEntry = list[mid]
+
+                if (entryCmp.compare(targetEntry, midEntry) > 0) {
+                    low = mid + 1
+                } else {
+                    high = mid
+                }
+            }
+
+            // Sophisticated search around the found position for exact key match
+            var left = low - 1
+            var right = low
+
+            while (left >= 0 || right < list.size) {
+                if (right < list.size) {
+                    val entry = list[right]
+                    if (entry.key == key) return right
+                    if (entryCmp.compare(targetEntry, entry) != 0) right = list.size else right++
+                }
+
+                if (left >= 0) {
+                    val entry = list[left]
+                    if (entry.key == key) return left
+                    if (entryCmp.compare(targetEntry, entry) != 0) left = -1 else left--
+                }
+            }
+
+            return if (returnInsertionPoint) low else -1
         }
 
-        scope.launch {
-            changes.collect { change ->
-                when (change) {
-                    is Put -> {
-                        val entry = MapEntry(change.key, change.value)
-                        val passes = filter?.invoke(entry) != false
+        LaunchedEffect(changes, entryComparator, filter, initialEntriesProvider, lifecycleOwner, minActiveState) {
+            lifecycleOwner.lifecycle.repeatOnLifecycle(minActiveState) {
+                changes
+                    .onStart { emit(Rebuild()) }
+                    .collect { change ->
+                        when (change) {
+                            is Put -> {
+                                val entry = MapEntry(change.key, change.value)
+                                val passes = filter?.invoke(entry) != false
 
-                        if (change.isUpdate && change.oldValue != null) {
-                            val oldIndex = findIndex(change.key, change.oldValue, false)
-                            if (oldIndex >= 0) list.removeAt(oldIndex)
-                            if (passes) list.add(findIndex(change.key, change.value), entry)
-                        } else if (passes) {
-                            list.add(findIndex(change.key, change.value), entry)
+                                if (change.isUpdate && change.oldValue != null) {
+                                    val oldIndex = findIndex(change.key, change.oldValue, false)
+                                    if (oldIndex >= 0) list.removeAt(oldIndex)
+                                    if (passes) list.add(findIndex(change.key, change.value), entry)
+                                } else if (passes) {
+                                    list.add(findIndex(change.key, change.value), entry)
+                                }
+                            }
+
+                            is Removed -> {
+                                val index = findIndex(change.key, change.oldValue, false)
+                                if (index >= 0) list.removeAt(index)
+                            }
+
+                            is Cleared -> list.clear()
+                            is Rebuild -> {
+                                list.clear()
+                                list.addAll(getSortedEntries())
+                            }
                         }
                     }
-
-                    is Removed -> {
-                        val index = findIndex(change.key, change.oldValue, false)
-                        if (index >= 0) list.removeAt(index)
-                    }
-
-                    is Cleared -> list.clear()
-                    is Rebuild -> {
-                        list.clear()
-                        list.addAll(getSortedEntries())
-                    }
-                }
             }
         }
 
         return list
     }
 
-    /**
+/**
      * Creates a reactive SnapshotStateList filtered by multiple secondary key criteria with efficient O(k) initial lookup.
      *
      * This function provides high-performance filtered reactive lists by leveraging secondary indexes.
@@ -380,10 +421,15 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      *
      * ## Performance Advantages
      *
-     * - **Initial lookup**: O(log n) per criterion vs O(n) for full scan filtering
-     * - **Index intersection**: Efficient set operations on primary keys
-     * - **Reactive updates**: Only relevant changes trigger UI updates
-     * - **Memory efficient**: Indexes store only primary keys, not full objects
+     * - Initial lookup: O(log n) per criterion vs O(n) for full scan filtering
+     * - Index intersection: Efficient set operations on primary keys
+     * - Reactive updates: Only relevant changes trigger UI updates
+     * - Memory efficient: Indexes store only primary keys, not full objects
+     *
+     * ## Lifecycle
+     *
+     * Collection is lifecycle-aware and runs only while `lifecycleOwner` is at least `minActiveState`.
+     * On every (re)subscription, a Rebuild event is injected to reconcile missed changes.
      *
      * ## Usage Requirements
      *
@@ -391,17 +437,17 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      * - Criteria values are compared using equality (== not ===)
      * - Custom entryComparator is required for this overload
      *
-     * @param scope CoroutineScope for managing change observation
      * @param criteria variable number of secondary key criteria as "indexName" to value pairs
      * @param entryComparator comparator for entry ordering (required for this overload)
      * @param filter optional additional predicate filter (applied after secondary key filtering)
+     * @param lifecycleOwner owner that controls collection lifecycle (defaults to LocalLifecycleOwner)
+     * @param minActiveState minimum lifecycle state required for collection (defaults to STARTED)
      * @return reactive SnapshotStateList with efficient secondary key filtering
      *
      * @sample
      * ```kotlin
      * // Filter by multiple criteria
      * val seniorEngineersInNY = employees.asSnapshotStateListBySecondaryKey(
-     *     scope = viewModelScope,
      *     "department" to "Engineering",
      *     "level" to "Senior", 
      *     "location" to "New York",
@@ -410,18 +456,19 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      *
      * // With additional filter
      * val activeEmployees = employees.asSnapshotStateListBySecondaryKey(
-     *     scope = viewModelScope,
      *     "department" to "Engineering",
      *     entryComparator = compareBy { it.value.startDate },
      *     filter = { it.value.status == "Active" }
      * )
      * ```
      */
+    @Composable
     fun asSnapshotStateListBySecondaryKey(
-        scope: CoroutineScope,
         vararg criteria: Pair<String, Any?>,
         entryComparator: Comparator<Map.Entry<KeyType, ValueType>>,
         filter: ((Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
+        minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, ValueType>> {
         
         val initialEntriesProvider: () -> List<MapEntry<KeyType, ValueType>> = {
@@ -429,10 +476,16 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                 .map { key -> MapEntry(key, this[key]!!) }
         }
 
-        return asSnapshotStateList(scope, entryComparator, filter, initialEntriesProvider)
+        return asSnapshotStateList(
+            entryComparator = entryComparator,
+            filter = filter,
+            initialEntriesProvider = initialEntriesProvider,
+            lifecycleOwner = lifecycleOwner,
+            minActiveState = minActiveState
+        )
     }
 
-    /**
+/**
      * Creates a reactive SnapshotStateList filtered by multiple secondary key criteria with automatic sorting.
      *
      * This convenience overload automatically generates a comparator that sorts entries by
@@ -453,35 +506,41 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      * - All criteria values must implement Comparable
      * - All criteria keys must exist in secondary indexes
      *
-     * @param scope CoroutineScope for managing change observation
+     * ## Lifecycle
+     *
+     * Collection is lifecycle-aware and runs only while `lifecycleOwner` is at least `minActiveState`.
+     * On every (re)subscription, a Rebuild event is injected to reconcile missed changes.
+     *
      * @param criteria variable number of secondary key criteria with Comparable values
      * @param filter optional additional predicate filter
+     * @param lifecycleOwner owner that controls collection lifecycle (defaults to LocalLifecycleOwner)
+     * @param minActiveState minimum lifecycle state required for collection (defaults to STARTED)
      * @return reactive SnapshotStateList sorted by secondary key values
      *
      * @sample
      * ```kotlin
      * // Automatic sorting by department, then level, then location
      * val sortedEmployees = employees.asSnapshotStateListBySecondaryKey(
-     *     scope = viewModelScope,
      *     "department" to "Engineering",
      *     "level" to "Senior"
      * ) // Results sorted by: department, then level, then primary key
      *
      * // With additional filtering
      * val filteredResults = employees.asSnapshotStateListBySecondaryKey(
-     *     scope = viewModelScope,
      *     "location" to "Seattle",
      *     filter = { it.value.yearsExperience >= 5 }
      * )
      * ```
      */
+    @Composable
     fun asSnapshotStateListBySecondaryKey(
-        scope: CoroutineScope,
         vararg criteria: Pair<String, Comparable<*>?>,
         filter: ((Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
+        minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, ValueType>> {
 
-        val comparator: Comparator<Map.Entry<KeyType, ValueType>> = Comparator<Map.Entry<KeyType, ValueType>> { e1, e2 ->
+        val comparator: Comparator<Map.Entry<KeyType, ValueType>> = Comparator { e1, e2 ->
             // Compare by each secondary key in order until we find a difference
             for ((indexName, _) in criteria) {
                 val secCmp = compareValues(
@@ -494,7 +553,13 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             keyComparator.compare(e1.key, e2.key)
         }
 
-        return asSnapshotStateListBySecondaryKey(scope, criteria = criteria, comparator, filter)
+        return asSnapshotStateListBySecondaryKey(
+            criteria = criteria,
+            entryComparator = comparator,
+            filter = filter,
+            lifecycleOwner = lifecycleOwner,
+            minActiveState = minActiveState
+        )
     }
 
 }
