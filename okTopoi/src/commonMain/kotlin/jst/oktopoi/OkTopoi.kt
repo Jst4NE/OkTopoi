@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.io.files.FileSystem
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
@@ -35,35 +36,6 @@ fun initRootDirIO(initRootDir: Path, fileSystem: FileSystem = SystemFileSystem) 
     Logger.d("OkTopoi-Init") { "initRootDirIO set successfully" }
 }
 
-/**
- * Creates an observable state container for a single value.
- * 
- * This is the simplest form of state management in OkTopoi - just reactive state without 
- * persistence or synchronization.
- * 
- * @param ValueType the type of value to store (can be nullable)
- * @param defaultValue optional factory function to provide initial/default value
- * @return observable state container that emits changes via StateFlow
- * 
- * @sample
- * ```kotlin
- * // Simple state
- * val counter = e { 0 }
- * 
- * // Nullable state  
- * val userName = e<String?> { null }
- * 
- * // Usage
- * counter.value = 42
- * userName.value = "Alice"
- * ```
- */
-inline fun <reified ValueType : Any?> e(noinline defaultValue: (() -> ValueType?)? = null): E<ValueType> {
-    return E(
-        observing = null,
-        defaultValue = defaultValue
-    )
-}
 
 // ================================================================================================
 // FACTORY FUNCTIONS - State Management & Collections
@@ -75,9 +47,12 @@ inline fun <reified ValueType : Any?> e(noinline defaultValue: (() -> ValueType?
  * Choose the right factory function for your use case:
  * 
  * ## Single Values:
- * - **`e()`** - Observable state only
- * - **`ep()`** - Observable + File persistence  
- * - **`esp()`** - Observable + File persistence + Bidirectional sync
+ * - **`e { defaultValue }`** - Observable non-null state (defaultValue required)
+ * - **`e<T?>()`** - Observable nullable state (defaultValue optional)
+ * - **`ep { defaultValue }`** - Persistent non-null state (defaultValue required)
+ * - **`ep<T?>()`** - Persistent nullable state (defaultValue optional)  
+ * - **`esp { defaultValue }`** - Synchronized persistent non-null state (defaultValue required)
+ * - **`esp<T?>()`** - Synchronized persistent nullable state (defaultValue optional)
  * 
  * ## Collections:
  * - **`es()`** - Observable indexed collections
@@ -95,11 +70,21 @@ inline fun <reified ValueType : Any?> e(noinline defaultValue: (() -> ValueType?
  * 
  * ## Quick Examples:
  * ```kotlin
- * // Simple observable state
- * val counter = e { 0 }
+ * // Non-null observable state (type-safe)
+ * val counter = e { 0 }                    // E<Int> - never null
+ * val name = e { "default" }               // E<String> - never null
+ * val current: Int = counter.value         // Int, not Int?
  * 
- * // Persistent user preferences
- * val prefs = ep<UserSettings> { UserSettings.default() }
+ * // Nullable observable state
+ * val userName = e<String?> { "guest" }    // E<String?> - can be null  
+ * val userAge = e<Int?>()                  // E<Int?> - starts null
+ * val currentName: String? = userName.value // String?
+ * 
+ * // Persistent user preferences (non-null)
+ * val prefs = ep { UserSettings.default() }    // Ep<UserSettings> - never null
+ * 
+ * // Persistent nullable state
+ * val token = ep<String?> { "default-token" }  // Ep<String?> - can be null
  * 
  * // Collection with natural ordering
  * val users = es<String, User> { it.id }
@@ -111,47 +96,170 @@ inline fun <reified ValueType : Any?> e(noinline defaultValue: (() -> ValueType?
  * ```
  */
 
+
 /**
- * Creates a persistent state container that automatically saves/loads values to/from disk.
+ * Creates an observable state container for nullable values.
+ *
+ * This overload is for nullable types where the defaultValue is optional.
+ * The state container can hold null values and provides type-safe nullable access.
+ *
+ * @param ValueType the nullable type of value to store
+ * @param defaultValue optional factory function to provide initial/default value
+ * @return observable state container with nullable type safety
+ *
+ * @sample
+ * ```kotlin
+ * // Nullable state with default
+ * val userName = e<String?> { "guest" }
+ * userName.value = null                    // Allowed
+ * val current: String? = userName.value    // String?
+ *
+ * // Nullable state without default
+ * val userAge = e<Int?>()                  // Starts as null
+ * userAge.value = 25
+ * ```
+ *
+ * @see e(defaultValue) for non-null state containers
+ */
+@OktopoiNewInstanceFactory
+inline fun <reified ValueType : Any?> e(observing: StateFlow<ValueType>? = null, noinline defaultValue: (() -> ValueType)? = null): E<ValueType> {
+    return E(
+        observing = observing,
+        defaultValue = defaultValue
+    )
+}
+
+/**
+ * Creates an observable state container for non-null values.
+ *
+ * This overload is for non-null types where the defaultValue is required.
+ * The state container cannot hold null values and provides type-safe non-null access.
+ *
+ * @param ValueType the non-null type of value to store
+ * @param defaultValue required factory function that must return a non-null value
+ * @return observable state container with non-null type safety
+ *
+ * @sample
+ * ```kotlin
+ * // Non-null state (defaultValue required)
+ * val counter = e { 0 }                    // E<Int> - never null
+ * val name = e { "default" }               // E<String> - never null
+ * counter.value = 42                       // Int (not Int?)
+ * val current: Int = counter.value         // Type-safe non-null access
+ *
+ * // This would be a compile error:
+ * // val broken = e<String>()              // Missing required defaultValue
+ * // counter.value = null                  // Cannot assign null to non-null type
+ * ```
+ *
+ * @see e() for nullable state containers
+ */
+@OktopoiNewInstanceFactory
+inline fun <reified ValueType : Any> e(noinline defaultValue: (() -> ValueType)): E<ValueType> {
+    return E(
+        observing = null,
+        defaultValue = defaultValue
+    )
+}
+
+/**
+ * Creates a persistent state container for nullable values.
  * 
- * This extends basic observable state with file system persistence. All state changes are 
- * automatically persisted to disk. If the file exists on creation, the persisted value is loaded.
+ * This overload is for nullable types where the defaultValue is optional.
+ * All state changes are automatically persisted to disk with type-safe nullable access.
  * 
  * **Important:** Persistence setup failures throw PersistenceFailedException. If persistence
  * cannot be established, the function fails fast rather than creating a non-persistent fallback.
  * 
- * @param ValueType the type of value to store (must be serializable)
+ * @param ValueType the nullable type of value to store (must be serializable)
+ * @param defaultValue optional factory function for initial value when no persisted data exists
+ * @param observing optional external StateFlow to observe and mirror  
  * @param rootDir root directory for persistence files (null = use default from initDefaultIO)
  * @param fileSystem file system implementation to use (default: SystemFileSystem)
- * @param defaultValue factory function for initial value when no persisted data exists
- * @return persistent state container with automatic disk synchronization
+ * @return persistent state container with nullable type safety
  * @throws PersistenceFailedException if persistence setup fails (directory creation, file access, etc.)
  * 
  * @sample
  * ```kotlin
- * // Basic persistent state
- * val userPrefs = ep<UserSettings> { UserSettings.default() }
+ * // Nullable persistent state with default
+ * val userName = ep<String?> { "guest" }
+ * userName.value = null                    // Allowed
+ * val current: String? = userName.value    // String?
  * 
- * // Custom storage location
- * val config = ep<AppConfig>(
- *     rootDir = Path("/custom/config"),
- *     defaultValue = { AppConfig.defaultConfig() }
- * )
+ * // Nullable persistent state without default  
+ * val userAge = ep<Int?>()                 // Starts as null
+ * userAge.value = 25
  * 
- * // Usage - automatically persisted
- * userPrefs.value = newSettings  // Automatically saved to disk
- * val current = userPrefs.value  // Loaded from disk if available
+ * // With external observation
+ * val synced = ep<Data?>(observing = externalFlow)
  * ```
  * 
+ * @see ep(defaultValue) for non-null persistent state
  * @see initDefaultIO to configure default storage location
  * @see e for non-persistent state
  * @see esp for synchronized persistent state
  */
 @OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
 inline fun <reified ValueType : Any?> ep(
+    observing: StateFlow<ValueType>? = null,
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
     noinline defaultValue: (() -> ValueType?)? = null
+): Ep<ValueType> {
+    return Ep(
+        persisted = PersistedEInfo(
+            serializer<ValueType?>(),
+            rootDir,
+            fileSystem
+        ),
+        observing = observing,
+        defaultValue = defaultValue,
+        persistScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    )
+}
+
+/**
+ * Creates a persistent state container for non-null values.
+ * 
+ * This overload is for non-null types where the defaultValue is required.
+ * All state changes are automatically persisted to disk with type-safe non-null access.
+ * The state container cannot hold null values.
+ * 
+ * **Important:** Persistence setup failures throw PersistenceFailedException. If persistence
+ * cannot be established, the function fails fast rather than creating a non-persistent fallback.
+ * 
+ * @param ValueType the non-null type of value to store (must be serializable)
+ * @param defaultValue required factory function that must return a non-null value
+ * @param rootDir root directory for persistence files (null = use default from initDefaultIO)
+ * @param fileSystem file system implementation to use (default: SystemFileSystem)
+ * @return persistent state container with non-null type safety
+ * @throws PersistenceFailedException if persistence setup fails (directory creation, file access, etc.)
+ * 
+ * @sample
+ * ```kotlin
+ * // Non-null persistent state (defaultValue required)
+ * val counter = ep { 0 }                   // Ep<Int> - never null
+ * val config = ep { AppConfig.default() }  // Ep<AppConfig> - never null
+ * counter.value = 42                       // Int (not Int?)
+ * val current: Int = counter.value         // Type-safe non-null access
+ * 
+ * // This would be a compile error:
+ * // val broken = ep<String>()             // Missing required defaultValue
+ * // counter.value = null                  // Cannot assign null to non-null type
+ * ```
+ * 
+ * @see ep() for nullable persistent state
+ * @see initDefaultIO to configure default storage location
+ * @see e for non-persistent state
+ * @see esp for synchronized persistent state
+ */
+@OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
+inline fun <reified ValueType : Any> ep(
+    rootDir: Path? = null,
+    fileSystem: FileSystem = SystemFileSystem,
+    noinline defaultValue: () -> ValueType
 ): Ep<ValueType> {
     return Ep(
         persisted = PersistedEInfo(
@@ -205,6 +313,7 @@ inline fun <reified ValueType : Any?> ep(
  * @see eps for persistent collections
  * @see esps for synchronized collections
  */
+@OktopoiNewInstanceFactory
 inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> es(
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
 ): Es<KeyType, ValueType> {
@@ -256,6 +365,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> es(
  * @see eps for persistent collections
  * @see esps for synchronized collections
  */
+@OktopoiNewInstanceFactory
 inline fun <reified KeyType : Any, reified ValueType : Any> es(
     comparator: Comparator<KeyType>,
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {}
@@ -289,6 +399,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> es(
  * @see esps for synchronized persistent collections
  */
 @OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
 inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
@@ -301,7 +412,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
             rootDir,
             fileSystem
         ),
-        sortingBy = { k1, k2 -> k1.compareTo(k2) },
+        sortingBy = naturalOrder(),
         secondaryKeys = secondaryKeys,
         persistScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     )
@@ -331,6 +442,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
  * @see esps for synchronized persistent collections
  */
 @OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
 inline fun <reified KeyType : Any, reified ValueType : Any> eps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
@@ -377,6 +489,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> eps(
  * @see es for non-persistent collections
  */
 @OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
 inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> esps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
@@ -403,6 +516,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> esps
 }
 
 @OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
 inline fun <reified KeyType : Any, reified ValueType : Any> esps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
@@ -430,6 +544,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> esps(
 }
 
 @OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
 inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> CoroutineScope.esps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
@@ -455,6 +570,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> Coro
 }
 
 @OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
 inline fun <reified KeyType : Any, reified ValueType : Any> CoroutineScope.esps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
@@ -481,37 +597,118 @@ inline fun <reified KeyType : Any, reified ValueType : Any> CoroutineScope.esps(
 }
 
 /**
- * Creates a synchronized persistent observable state container.
+ * Creates a synchronized persistent state container for nullable values.
  * 
- * This function creates a state container that automatically persists all changes to the file system
- * AND synchronizes bidirectionally with other instances through provided sync flows.
- * State changes are reactive and can be observed using Flow operations.
+ * This overload is for nullable types where the defaultValue is optional.
+ * The state container automatically persists all changes to the file system AND synchronizes
+ * bidirectionally with other instances through provided sync flows.
  * 
  * **Required Setup:** Call `initDefaultIO(rootDir)` before using this function, or provide explicit `rootDir`.
  * 
- * @param ValueType the type of value to store (can be nullable)
+ * @param ValueType the nullable type of value to store (must be serializable)
+ * @param defaultValue optional factory function for initial value when no persisted data exists
+ * @param observing optional external StateFlow to observe and mirror
  * @param rootDir root directory for persistence files (null = use default from initDefaultIO)
  * @param fileSystem file system implementation to use (default: SystemFileSystem)
- * @param defaultValue factory function for initial value when no persisted data exists
  * @param incomingSync flow of incoming changes from remote sources  
  * @param outgoingSync function to send local changes to remote sources
  * @param syncActive flow controlling whether sync is active (default: always on)
  * @param syncScope coroutine scope for sync operations
  * 
+ * @sample
+ * ```kotlin
+ * // Nullable synchronized persistent state
+ * val userName = esp<String?>(
+ *     defaultValue = { "guest" },
+ *     incomingSync = userSyncFlow,
+ *     outgoingSync = { key, value, timestamp -> sendToRemote(key, value, timestamp) }
+ * )
+ * userName.value = null                    // Allowed
+ * val current: String? = userName.value    // String?
+ * ```
+ * 
+ * @see esp(defaultValue, ...) for non-null synchronized persistent state
  * @see initDefaultIO to configure default storage location
- * @see initRootDirIO to configure specific storage location
  * @see ep for persistent state without sync
  * @see e for non-persistent state
  */
 @OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
 inline fun <reified ValueType : Any?> esp(
+    observing: StateFlow<ValueType>? = null,
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
-    noinline defaultValue: (() -> ValueType?)? = null,
     incomingSync: Flow<Triple<String, ValueType?, Long>>,
     noinline outgoingSync: suspend (String, ValueType?, Long) -> Unit,
     syncActive: Flow<Boolean> = MutableStateFlow(true),
-    syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    noinline defaultValue: (() -> ValueType?)? = null
+): Esp<ValueType> {
+    return Esp(
+        persisted = PersistedEInfo(
+            serializer<ValueType?>(),
+            rootDir,
+            fileSystem
+        ),
+        observing = observing,
+        defaultValue = defaultValue,
+        incomingSync = incomingSync,
+        outgoingSync = outgoingSync,
+        syncActive = syncActive,
+        syncScope = syncScope
+    )
+}
+
+/**
+ * Creates a synchronized persistent state container for non-null values.
+ * 
+ * This overload is for non-null types where the defaultValue is required.
+ * The state container automatically persists all changes to the file system AND synchronizes
+ * bidirectionally with other instances through provided sync flows.
+ * The state container cannot hold null values.
+ * 
+ * **Required Setup:** Call `initDefaultIO(rootDir)` before using this function, or provide explicit `rootDir`.
+ * 
+ * @param ValueType the non-null type of value to store (must be serializable)
+ * @param defaultValue required factory function that must return a non-null value
+ * @param rootDir root directory for persistence files (null = use default from initDefaultIO)
+ * @param fileSystem file system implementation to use (default: SystemFileSystem)
+ * @param incomingSync flow of incoming changes from remote sources  
+ * @param outgoingSync function to send local changes to remote sources
+ * @param syncActive flow controlling whether sync is active (default: always on)
+ * @param syncScope coroutine scope for sync operations
+ * 
+ * @sample
+ * ```kotlin
+ * // Non-null synchronized persistent state (defaultValue required)
+ * val counter = esp(
+ *     defaultValue = { 0 },
+ *     incomingSync = counterSyncFlow,
+ *     outgoingSync = { key, value, timestamp -> sendToRemote(key, value, timestamp) }
+ * )
+ * counter.value = 42                       // Int (not Int?)
+ * val current: Int = counter.value         // Type-safe non-null access
+ * 
+ * // This would be a compile error:
+ * // val broken = esp<String>(...)         // Missing required defaultValue
+ * // counter.value = null                  // Cannot assign null to non-null type
+ * ```
+ * 
+ * @see esp() for nullable synchronized persistent state
+ * @see initDefaultIO to configure default storage location
+ * @see ep for persistent state without sync
+ * @see e for non-persistent state
+ */
+@OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
+inline fun <reified ValueType : Any> esp(
+    rootDir: Path? = null,
+    fileSystem: FileSystem = SystemFileSystem,
+    incomingSync: Flow<Triple<String, ValueType?, Long>>,
+    noinline outgoingSync: suspend (String, ValueType?, Long) -> Unit,
+    syncActive: Flow<Boolean> = MutableStateFlow(true),
+    syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    noinline defaultValue: () -> ValueType
 ): Esp<ValueType> {
     return Esp(
         persisted = PersistedEInfo(
@@ -529,6 +726,7 @@ inline fun <reified ValueType : Any?> esp(
 }
 
 @OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
 inline fun <reified ValueType : Any?> CoroutineScope.esp(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
@@ -553,6 +751,7 @@ inline fun <reified ValueType : Any?> CoroutineScope.esp(
 }
 
 @OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
 inline fun <reified ValueType : Any?> CoroutineScope.ep(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
@@ -571,6 +770,7 @@ inline fun <reified ValueType : Any?> CoroutineScope.ep(
 }
 
 @OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
 inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> CoroutineScope.eps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,
@@ -590,6 +790,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> Coro
 }
 
 @OptIn(InternalSerializationApi::class)
+@OktopoiNewInstanceFactory
 inline fun <reified KeyType : Any, reified ValueType : Any> CoroutineScope.eps(
     rootDir: Path? = null,
     fileSystem: FileSystem = SystemFileSystem,

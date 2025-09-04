@@ -1,4 +1,5 @@
 @file:OptIn(ExperimentalTime::class)
+@file:Suppress("UNCHECKED_CAST")
 
 package jst.oktopoi
 
@@ -25,7 +26,6 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlin.time.Clock
-import kotlin.time.Duration.Companion.minutes
 import kotlin.time.ExperimentalTime
 
 @Serializable
@@ -88,7 +88,7 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
         inboundJob = syncScope.launch { 
             syncActive
                 .flatMapLatest { active -> if (active) incomingSync else emptyFlow() }
-                .collect { (propertyId, value, timestamp) -> fromSync(propertyId, value, timestamp) }
+                .collect { (propertyId, value, timestamp) -> fromSync(value, timestamp) }
         }
 
         // Set up outbound sync: periodic sync of unsynced data
@@ -123,7 +123,7 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
      * Handles incoming sync data, applying it if timestamp is newer.
      */
     @OptIn(ExperimentalTime::class)
-    fun fromSync(propertyId: String, value: ValueType?, timestamp: Long, force: Boolean = false): Boolean {
+    fun fromSync(value: ValueType?, timestamp: Long, force: Boolean = false): Boolean {
         return synchronized(lock) {
             val currentTimestamp = syncTimestamp
             
@@ -136,7 +136,7 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
             if (value != null) {
                 super.value = value
             } else {
-                super.value = null
+                super.value = defaultValue?.invoke() ?: null as ValueType
             }
             
             // Update sync timestamp
@@ -172,19 +172,19 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
 
     // Override all state-changing methods to add sync tracking
     
-    override var value: ValueType?
+    override var value: ValueType
         get() = super.value
         set(value) {
             super.value = value
             markForSync()
         }
 
-    override suspend fun emit(value: ValueType?) {
+    override suspend fun emit(value: ValueType) {
         super.emit(value)
         markForSync()
     }
 
-    override fun tryEmit(value: ValueType?): Boolean {
+    override fun tryEmit(value: ValueType): Boolean {
         val result = super.tryEmit(value)
         if (result) {
             markForSync()
@@ -192,7 +192,7 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
         return result
     }
 
-    override fun compareAndSet(expect: ValueType?, update: ValueType?): Boolean {
+    override fun compareAndSet(expect: ValueType, update: ValueType): Boolean {
         val result = super.compareAndSet(expect, update)
         if (result) {
             markForSync()
@@ -205,7 +205,7 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
         markForSync()
     }
 
-    override fun setIfDifferent(newValue: ValueType?): Boolean {
+    override fun setIfDifferent(newValue: ValueType): Boolean {
         val result = super.setIfDifferent(newValue)
         if (result) {
             markForSync()
@@ -259,7 +259,7 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
     fun clearSync(): ValueType? {
         synchronized(lock) {
             val oldValue = super.value
-            super.value = null
+            value = defaultValue!!.invoke()!!
             syncTimestamp = -Clock.System.now().toEpochMilliseconds() // Negative for deletion
             syncTrigger.tryEmit(Unit)
             return oldValue

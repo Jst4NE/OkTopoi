@@ -1,3 +1,5 @@
+@file:Suppress("UNCHECKED_CAST")
+
 package jst.oktopoi
 
 import co.touchlab.kermit.Logger
@@ -122,6 +124,9 @@ open class Ep<ValueType : Any?> : E<ValueType> {
         // Initialize persistence
         runBlockingMultiplatform {
             try {
+
+                println ("EP[${this@Ep.callingClassName}.${this@Ep.propertyName}] setup waiting for init")
+
                 val rootDir: Path = if (persisted.rootDir == null) {
                     initDefaultIO.filter { it?.second == persisted.fileSystem }.first()!!.first
                 } else {
@@ -137,18 +142,20 @@ open class Ep<ValueType : Any?> : E<ValueType> {
 
                 // Load existing value from file if it exists and is not empty
                 readFromFile()?.let { content ->
-                    super.value = decodeValue(content)
+                    super.value = decodeValue(content) as ValueType
                 }
 
             } catch (e: Exception) {
                 throw PersistenceFailedException("Failed to initialize persistence: ${e.message}", e)
             }
+
+            println ("EP[${this@Ep.callingClassName}.${this@Ep.propertyName}] setup finished")
         }
     }
 
     // Override all state-changing methods to add persistence
     
-    override var value: ValueType?
+    override var value: ValueType
         get() = super.value
         set(newValue) {
             val oldValue = super.value
@@ -161,7 +168,7 @@ open class Ep<ValueType : Any?> : E<ValueType> {
             }
         }
 
-    override suspend fun emit(value: ValueType?) {
+    override suspend fun emit(value: ValueType) {
         val oldValue = super.value
         try {
             super.emit(value)
@@ -173,7 +180,7 @@ open class Ep<ValueType : Any?> : E<ValueType> {
         }
     }
 
-    override fun tryEmit(value: ValueType?): Boolean {
+    override fun tryEmit(value: ValueType): Boolean {
         val oldValue = super.value
         val result = super.tryEmit(value)
         if (result) {
@@ -188,7 +195,7 @@ open class Ep<ValueType : Any?> : E<ValueType> {
         return result
     }
 
-    override fun compareAndSet(expect: ValueType?, update: ValueType?): Boolean {
+    override fun compareAndSet(expect: ValueType, update: ValueType): Boolean {
         val result = super.compareAndSet(expect, update)
         if (result) {
             try {
@@ -221,7 +228,7 @@ open class Ep<ValueType : Any?> : E<ValueType> {
         val oldValue = super.value
         super.clear()
         try {
-            persistValue(null)
+            persistValue(defaultValue?.invoke())
         } catch (e: Exception) {
             super.value = oldValue  // Rollback
             throw PersistenceFailedException("Failed to persist clear: ${e.message}", e)
