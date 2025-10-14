@@ -45,6 +45,8 @@ private data class PersistedValueWithSyncEsp<T>(
 @OptIn(ExperimentalTime::class, ExperimentalCoroutinesApi::class)
 open class Esp<ValueType : Any?> : Ep<ValueType> {
 
+    private val log = Logger.withTag(this::class.simpleName.toString())
+
     private var syncTimestamp: Long = 0L // Current sync timestamp (0 = synced, >0 = needs sync)
     private val syncTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1) // Triggers sync flow
     private val lock = SynchronizedObject() // For sync metadata access
@@ -66,7 +68,7 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
         incomingSync: Flow<Triple<String, ValueType?, Long>>,
         outgoingSync: suspend (String, ValueType?, Long) -> Unit,
         syncActive: Flow<Boolean> = MutableStateFlow(true),
-        syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     ) : super(persisted, observing, defaultValue) {
         this.incomingSync = incomingSync
         this.outgoingSync = outgoingSync

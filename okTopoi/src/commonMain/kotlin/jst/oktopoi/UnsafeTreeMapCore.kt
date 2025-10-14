@@ -289,7 +289,7 @@ open class UnsafeTreeMapCore<K, V> internal constructor(
         var x = node
         
         while (x != root && x?.color == Color.BLACK) {
-            val parent = x?.parent ?: return
+            val parent = x.parent ?: return
             
             if (x == parent.left) {
                 // x is left child
@@ -432,9 +432,9 @@ open class UnsafeTreeMapCore<K, V> internal constructor(
         
         // Find insertion point or existing node
         var current = root!!
-        var parent: Node<K, V>? = null
-        var cmp = 0
-        
+        var parent: Node<K, V>?
+        var cmp: Int
+
         while (true) {
             parent = current
             cmp = keyComparator.compare(key, current.key)
@@ -584,11 +584,19 @@ open class UnsafeTreeMapCore<K, V> internal constructor(
     }
     
     /**
+     * Returns the first (minimum) node in this map, or null if the map is empty.
+     * Used internally for efficient iterator initialization.
+     */
+    internal fun firstNodeUnsafe(): Node<K, V>? {
+        return root?.minimum()
+    }
+    
+    /**
      * Returns a key-value mapping associated with the least key in this map,
      * or null if the map is empty.
      */
     protected fun firstEntryUnsafe(): MapEntry<K, V>? {
-        val node = root?.minimum() ?: return null
+        val node = firstNodeUnsafe() ?: return null
         return MapEntry(node.key, node.value)
     }
     
@@ -702,6 +710,29 @@ open class UnsafeTreeMapCore<K, V> internal constructor(
     }
     
     /**
+     * Returns the node associated with the least key greater than or equal to the given key,
+     * or null if no such key exists. Used internally for efficient iterator recovery.
+     */
+    internal fun ceilingNodeUnsafe(key: K): Node<K, V>? {
+        var result: Node<K, V>? = null
+        var current = root
+        
+        while (current != null) {
+            val cmp = keyComparator.compare(key, current.key)
+            when {
+                cmp == 0 -> return current  // exact match
+                cmp > 0 -> current = current.right  // key > current.key, go right
+                else -> {
+                    result = current  // current.key > key, potential result
+                    current = current.left
+                }
+            }
+        }
+        
+        return result
+    }
+    
+    /**
      * Returns a key-value mapping associated with the least key strictly greater than the given key,
      * or null if no such key exists.
      */
@@ -727,7 +758,7 @@ open class UnsafeTreeMapCore<K, V> internal constructor(
      * Removes and returns a key-value mapping associated with the least key in this map,
      * or null if the map is empty.
      */
-    protected fun pollFirstEntryUnsafe(): MapEntry<K, V>? {
+    protected open fun pollFirstEntryUnsafe(): MapEntry<K, V>? {
         val node = root?.minimum() ?: return null
         val entry = MapEntry(node.key, node.value)
         
@@ -741,7 +772,7 @@ open class UnsafeTreeMapCore<K, V> internal constructor(
      * Removes and returns a key-value mapping associated with the greatest key in this map,
      * or null if the map is empty.
      */
-    protected fun pollLastEntryUnsafe(): MapEntry<K, V>? {
+    protected open fun pollLastEntryUnsafe(): MapEntry<K, V>? {
         val node = root?.maximum() ?: return null
         val entry = MapEntry(node.key, node.value)
         
@@ -749,6 +780,57 @@ open class UnsafeTreeMapCore<K, V> internal constructor(
         _size--
         
         return entry
+    }
+    
+    // ========================================================================
+    // Direct Collection Operations (Efficient, No Object Creation)
+    // ========================================================================
+    
+    /**
+     * Applies the given action to each entry in this map.
+     * More efficient than entriesUnsafe().forEach() as it doesn't create collection objects.
+     * 
+     * IMPORTANT: The action may safely call removeUnsafe() on the current entry's key,
+     * but MUST NOT delete any other entries during iteration, as this would break the traversal.
+     * 
+     * Safe usage:
+     * ```kotlin
+     * forEachUnsafe { entry ->
+     *     if (shouldRemove(entry)) {
+     *         removeUnsafe(entry.key)  // ✅ Safe - removes current entry
+     *     }
+     * }
+     * ```
+     * 
+     * Unsafe usage:
+     * ```kotlin
+     * forEachUnsafe { entry ->
+     *     removeUnsafe(someOtherKey)  // ❌ Unsafe - breaks iteration
+     * }
+     * ```
+     */
+    protected fun forEachUnsafe(action: (key: K, value: V) -> Unit) {
+        var current = root?.minimum()
+        while (current != null) {
+            val next = current.successor()  // Cache successor before action (safe against current node deletion)
+            action(current.key, current.value)
+            current = next  // Use pre-cached successor
+        }
+    }
+    
+    /**
+     * Returns the first entry whose value matches the predicate, or null if no such entry exists.
+     * More efficient than entriesUnsafe().find() as it compares values directly without creating MapEntry objects.
+     */
+    protected fun findEntryByValueUnsafe(valuePredicate: (V) -> Boolean): MapEntry<K, V>? {
+        var current = root?.minimum()
+        while (current != null) {
+            if (valuePredicate(current.value)) {
+                return MapEntry(current.key, current.value)
+            }
+            current = current.successor()
+        }
+        return null
     }
     
     // ========================================================================
@@ -1134,7 +1216,7 @@ open class UnsafeTreeMapCore<K, V> internal constructor(
      * @param value value to be associated with the specified key
      * @return the previous value associated with the specified key, or null if there was no mapping for the key
      */
-    protected fun replaceUnsafe(key: K, value: V): V? {
+    protected open fun replaceUnsafe(key: K, value: V): V? {
         val existingNode = findNode(key) ?: return null
         val oldValue = existingNode.value
         
@@ -1151,7 +1233,7 @@ open class UnsafeTreeMapCore<K, V> internal constructor(
      * @param newValue value to be associated with the specified key
      * @return true if the value was replaced
      */
-    protected fun replaceUnsafe(key: K, oldValue: V, newValue: V): Boolean {
+    protected open fun replaceUnsafe(key: K, oldValue: V, newValue: V): Boolean {
         val existingNode = findNode(key) ?: return false
         
         if (existingNode.value != oldValue) {

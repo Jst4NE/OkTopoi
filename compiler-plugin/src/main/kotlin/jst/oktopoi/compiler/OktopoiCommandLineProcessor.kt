@@ -7,6 +7,7 @@ import org.jetbrains.kotlin.config.CompilerConfiguration
 
 @OptIn(ExperimentalCompilerApi::class)
 class OktopoiCommandLineProcessor : CommandLineProcessor {
+    
     override val pluginId: String = "jst.oktopoi.compiler-plugin"
     override val pluginOptions: Collection<AbstractCliOption> = emptyList()
     

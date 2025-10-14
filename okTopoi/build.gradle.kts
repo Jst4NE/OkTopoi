@@ -29,7 +29,7 @@ kotlin {
     }
     iosX64()
     iosArm64()
-    iosSimulatorArm64()
+//    iosSimulatorArm64()
     linuxX64()
 
     @OptIn(ExperimentalWasmDsl::class)
@@ -91,6 +91,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
     }
+}
+
+dependencies {
+    // Make the IR compiler plugin available when compiling the okTopoi module itself
+    add("kotlinCompilerPluginClasspath", project(":compiler-plugin"))
 }
 
 publishing {

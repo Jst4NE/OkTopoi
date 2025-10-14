@@ -2,6 +2,7 @@
 
 package jst.oktopoi
 
+import co.touchlab.kermit.Logger
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
 import kotlinx.coroutines.flow.FlowCollector
@@ -89,6 +90,8 @@ open class E<ValueType : Any?>(
     private val observing: StateFlow<ValueType>?,
     val defaultValue: (() -> ValueType?)?
 ) : MutableStateFlow<ValueType> {
+
+    private val log = Logger.withTag(this::class.simpleName.toString())
 
     private val state: MutableStateFlow<ValueType?> = MutableStateFlow(defaultValue?.invoke())
 

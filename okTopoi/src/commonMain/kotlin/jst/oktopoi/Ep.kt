@@ -106,11 +106,13 @@ open class Ep<ValueType : Any?> : E<ValueType> {
     private lateinit var fileSystem: FileSystem
     private val persistScope: CoroutineScope
 
+    private val log = Logger.withTag(this::class.simpleName.toString())
+
     constructor(
         persisted: PersistedEInfo<ValueType>,
         observing: StateFlow<ValueType>? = null,
         defaultValue: (() -> ValueType?)? = null,
-        persistScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        persistScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     ) : super(observing, defaultValue) {
         this.persisted = persisted
         this.persistScope = persistScope
@@ -125,7 +127,7 @@ open class Ep<ValueType : Any?> : E<ValueType> {
         runBlockingMultiplatform {
             try {
 
-                println ("EP[${this@Ep.callingClassName}.${this@Ep.propertyName}] setup waiting for init")
+                log.d { "EP[${this@Ep.callingClassName}.${this@Ep.propertyName}] setup waiting for init" }
 
                 val rootDir: Path = if (persisted.rootDir == null) {
                     initDefaultIO.filter { it?.second == persisted.fileSystem }.first()!!.first
@@ -149,7 +151,7 @@ open class Ep<ValueType : Any?> : E<ValueType> {
                 throw PersistenceFailedException("Failed to initialize persistence: ${e.message}", e)
             }
 
-            println ("EP[${this@Ep.callingClassName}.${this@Ep.propertyName}] setup finished")
+            log.d { "EP[${this@Ep.callingClassName}.${this@Ep.propertyName}] setup finished" }
         }
     }
 

@@ -1,5 +1,6 @@
 package jst.oktopoi
 
+import co.touchlab.kermit.Logger
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.io.buffered
@@ -115,16 +116,22 @@ import kotlinx.coroutines.SupervisorJob
  */
 open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
 
+    private val log = Logger.withTag(this::class.simpleName.toString())
+
     protected val persisted: PersistedEsInfo<KeyType, ValueType>
     protected lateinit var dirPath: Path
     protected lateinit var fileSystem: FileSystem
     private val persistScope: CoroutineScope
 
+    // Suppress persistence writes during initialization load of existing files
+    // Accessed only during setup() or under TreeMap lock paths
+    protected var persistenceLoadDepth: Int = 0
+
     constructor(
         persisted: PersistedEsInfo<KeyType, ValueType>,
         sortingBy: Comparator<KeyType>,
         secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
-        persistScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        persistScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     ) : super(sortingBy, secondaryKeys) {
         this.persisted = persisted
         this.persistScope = persistScope
@@ -132,9 +139,13 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
 
     @OptIn(ExperimentalTime::class)
     override fun setup() {
+        super.setup()
+
         runBlockingMultiplatform {
             try {
                 val rootDir: Path
+
+                log.d { "ESP[${this@Eps.callingClassName}.${this@Eps.propertyName}] setup waiting for init" }
                 if (persisted.rootDir == null) {
                     rootDir = initDefaultIO.filter { it?.second == persisted.fileSystem }.first()!!.first
                 } else {
@@ -149,18 +160,27 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
 
                 val existingFiles = fileSystem.list(dirPath).filter { (fileSystem.metadataOrNull(it)?.size ?: 0) != 0L }
                 
-                existingFiles.forEach { file ->
-                    fileSystem.source(file)
-                        .buffered()
-                        .use { source ->
-                            fromPersistString(source.readString(), file.name)
-                        }
+                // Suppress persistence while loading existing entries
+                this@Eps.persistenceLoadDepth++
+                try {
+                    existingFiles.forEach { file ->
+                        fileSystem.source(file)
+                            .buffered()
+                            .use { source ->
+                                fromPersistString(source.readString(), file.name)
+                            }
+                    }
+                } finally {
+                    this@Eps.persistenceLoadDepth--
                 }
 
 
             } catch (e: Exception) {
                 throw PersistenceFailedException("Failed to initialize collection persistence: ${e.message}", e)
             }
+
+
+            log.d { "ESP[${this@Eps.callingClassName}.${this@Eps.propertyName}] setup finished" }
         }
     }
 
@@ -187,59 +207,42 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
     }
 
     // ========================================================================
-    // Override core unsafe methods to add persistence with inheritance approach
+    // Override TreeMap before hooks to add persistence-first approach
     // ========================================================================
-
-    override fun putUnsafe(key: KeyType, value: ValueType): ValueType? {
-        // We're already inside rwLock.withWriteLock here!
-        
-        // Persistence first (fail-fast approach)
+    
+    override fun onBeforePutUnsafe(key: KeyType, newValue: ValueType) {
+        // During initialization load, skip redundant persistence writes
+        if (persistenceLoadDepth > 0) return
+        // Persistence-first approach: persist before memory update
         try {
-            persistEntry(key, value)
+            persistEntry(key, newValue)
         } catch (e: Exception) {
             throw PersistenceFailedException("Failed to persist put($key): ${e.message}", e)
         }
-        
-        // Memory + secondary indexes (TreeMap's implementation)
-        return super.putUnsafe(key, value)
     }
     
-    override fun removeUnsafe(key: KeyType): ValueType? {
-        // Check if key exists first (don't persist unnecessary deletes)
-        val oldValue = getUnsafe(key)
-        if (oldValue == null) return null
-        
-        // Persistence first
+    override fun onBeforeRemoveUnsafe(key: KeyType) {
+        // During initialization load, skip redundant persistence writes
+        if (persistenceLoadDepth > 0) return
+        // Persistence-first approach: persist removal before memory update
         try {
             persistEntry(key, null)
         } catch (e: Exception) {
             throw PersistenceFailedException("Failed to persist remove($key): ${e.message}", e)
         }
-        
-        // Memory + secondary indexes (TreeMap's implementation)
-        return super.removeUnsafe(key)
     }
     
-    override fun clearUnsafe() {
-        // Capture keys for bulk deletion
-        val keys = keysUnsafe().toList()
-        
-        // Persistence first - delete all files
+    override fun onBeforeClearUnsafe() {
+        // Persistence-first approach: delete all files before memory clear
         try {
-            keys.forEach { key -> persistEntry(key, null) }
+            keysUnsafe().forEach { key -> persistEntry(key, null) }
         } catch (e: Exception) {
             throw PersistenceFailedException("Failed to persist clear(): ${e.message}", e)
         }
-        
-        // Memory + secondary indexes (TreeMap's implementation)
-        super.clearUnsafe()
     }
     
-    // ========================================================================
-    // All complex operations (compute*, putIfAbsent, replace, merge) now work
-    // automatically with persistence because they delegate to putUnsafe/removeUnsafe
-    // in UnsafeTreeMapCore, which call our overridden methods above!
-    // ========================================================================
+    // All advanced operations (compute, merge, etc.) automatically get persistence
+    // through the unsafe hooks being called by their underlying put/remove operations
 
     open fun fromPersistString(string: String, fileName: String) {
         val value = Json.decodeFromString(
@@ -250,7 +253,8 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
             persisted.keyTypeSerializer,
             fileName
         )
-        this@Eps.put(key, value)
+        // Use unsafe put during initialization to avoid locking overhead; hooks are suppressed by persistenceLoadDepth
+        putUnsafe(key, value)
     }
 }
 

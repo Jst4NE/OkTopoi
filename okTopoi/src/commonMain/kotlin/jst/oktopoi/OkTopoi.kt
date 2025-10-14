@@ -14,13 +14,15 @@ import kotlinx.io.files.SystemFileSystem
 import kotlinx.serialization.InternalSerializationApi
 import kotlinx.serialization.serializer
 
+private val log = Logger.withTag("Oktopoi")
+
 /**
  * Exception thrown when persistence operations fail.
  * Indicates that data could not be written to disk, ensuring fail-fast behavior for data integrity.
  */
 class PersistenceFailedException(message: String, cause: Throwable) : RuntimeException(message, cause)
 
-internal val persistCoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+internal val persistCoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher)
 internal val initDefaultIO = MutableStateFlow<Pair<Path, FileSystem>?>(null)
 internal val initIO = MutableStateFlow<Pair<Path, FileSystem>?>(null)
 
@@ -215,7 +217,7 @@ inline fun <reified ValueType : Any?> ep(
         ),
         observing = observing,
         defaultValue = defaultValue,
-        persistScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        persistScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     )
 }
 
@@ -269,7 +271,7 @@ inline fun <reified ValueType : Any> ep(
         ),
         observing = null,
         defaultValue = defaultValue,
-        persistScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        persistScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     )
 }
 
@@ -414,7 +416,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> eps(
         ),
         sortingBy = naturalOrder(),
         secondaryKeys = secondaryKeys,
-        persistScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        persistScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     )
 }
 
@@ -458,7 +460,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> eps(
         ),
         sortingBy = sortingBy,
         secondaryKeys = secondaryKeys,
-        persistScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        persistScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     )
 }
 
@@ -496,8 +498,9 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> esps
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
     incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
     noinline outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit,
+    automaticOutwardSync: Boolean = true,
     syncActive: Flow<Boolean> = MutableStateFlow(true),
-    syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher)
 ): Esps<KeyType, ValueType> {
     return Esps(
         persisted = PersistedEsInfo(
@@ -510,6 +513,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> esps
         secondaryKeys = secondaryKeys,
         incomingSync = incomingSync,
         outgoingSync = outgoingSync,
+        automaticOutwardSync = automaticOutwardSync,
         syncActive = syncActive,
         syncScope = syncScope
     )
@@ -524,8 +528,9 @@ inline fun <reified KeyType : Any, reified ValueType : Any> esps(
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
     incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
     noinline outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit,
+    automaticOutwardSync: Boolean = true,
     syncActive: Flow<Boolean> = MutableStateFlow(true),
-    syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher)
 ): Esps<KeyType, ValueType> {
     return Esps(
         persisted = PersistedEsInfo(
@@ -538,6 +543,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> esps(
         secondaryKeys = secondaryKeys,
         incomingSync = incomingSync,
         outgoingSync = outgoingSync,
+        automaticOutwardSync = automaticOutwardSync,
         syncActive = syncActive,
         syncScope = syncScope
     )
@@ -551,6 +557,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> Coro
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
     incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
     noinline outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit,
+    automaticOutwardSync: Boolean = true,
     syncActive: Flow<Boolean> = MutableStateFlow(true)
 ): Esps<KeyType, ValueType> {
     return Esps(
@@ -564,6 +571,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> Coro
         secondaryKeys = secondaryKeys,
         incomingSync = incomingSync,
         outgoingSync = outgoingSync,
+        automaticOutwardSync = automaticOutwardSync,
         syncActive = syncActive,
         syncScope = this
     )
@@ -578,6 +586,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> CoroutineScope.esps(
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
     incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
     noinline outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit,
+    automaticOutwardSync: Boolean = true,
     syncActive: Flow<Boolean> = MutableStateFlow(true)
 ): Esps<KeyType, ValueType> {
     return Esps(
@@ -591,6 +600,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> CoroutineScope.esps(
         secondaryKeys = secondaryKeys,
         incomingSync = incomingSync,
         outgoingSync = outgoingSync,
+        automaticOutwardSync = automaticOutwardSync,
         syncActive = syncActive,
         syncScope = this
     )
@@ -641,7 +651,7 @@ inline fun <reified ValueType : Any?> esp(
     incomingSync: Flow<Triple<String, ValueType?, Long>>,
     noinline outgoingSync: suspend (String, ValueType?, Long) -> Unit,
     syncActive: Flow<Boolean> = MutableStateFlow(true),
-    syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher),
     noinline defaultValue: (() -> ValueType?)? = null
 ): Esp<ValueType> {
     return Esp(
@@ -707,7 +717,7 @@ inline fun <reified ValueType : Any> esp(
     incomingSync: Flow<Triple<String, ValueType?, Long>>,
     noinline outgoingSync: suspend (String, ValueType?, Long) -> Unit,
     syncActive: Flow<Boolean> = MutableStateFlow(true),
-    syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher),
     noinline defaultValue: () -> ValueType
 ): Esp<ValueType> {
     return Esp(
