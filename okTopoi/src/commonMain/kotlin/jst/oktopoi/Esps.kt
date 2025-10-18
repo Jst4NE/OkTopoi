@@ -2,11 +2,14 @@
 
 package jst.oktopoi
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,6 +40,95 @@ private data class PersistedValueWithSync<T>(
     val syncTimestamp: Long  // 0 = synced, >0 = unsynced timestamp, <0 = deleted timestamp
 )
 
+/**
+ * Type-erased interface for sync dependency checking.
+ * Allows Esps to check and sync dependencies before syncing its own entries.
+ */
+interface SyncDependency<ThisValueType> {
+    /**
+     * Check if the dependency for this value needs syncing, and sync it if needed.
+     *
+     * @param value The value that has a foreign key dependency
+     * @param syncingStack Stack of (Esps, Key) pairs currently being synced (for circular dependency detection)
+     */
+    suspend fun syncDependencyIfNeeded(
+        value: ThisValueType,
+        syncingStack: Set<Pair<Any, Any>>
+    )
+}
+
+/**
+ * Type-safe implementation of SyncDependency.
+ * Extracts a foreign key from a child value and ensures the parent is synced first.
+ *
+ * @param dependsOn The parent Esps instance that this entry depends on
+ * @param keyExtractor Function to extract the foreign key from the child value (nullable for optional FKs)
+ */
+class TypedSyncDependency<ThisValueType, DepKeyType : Any, DepValueType : Any>(
+    private val dependsOn: Esps<DepKeyType, DepValueType>,
+    private val keyExtractor: (ThisValueType) -> DepKeyType?
+) : SyncDependency<ThisValueType> {
+
+    private val log = Logger.withTag("SyncDependency")
+
+    override suspend fun syncDependencyIfNeeded(value: ThisValueType, syncingStack: Set<Pair<Any, Any>>) {
+        val depKey = keyExtractor(value) ?: return  // No FK or null FK - no dependency
+
+        // Check if dependency is already synced (not in unsyncedKeysMap or timestamp is 0)
+        val depTimestamp = dependsOn.getUnsyncedTimestamp(depKey)
+        if (depTimestamp == null || depTimestamp == 0L) {
+            return  // Already synced, nothing to do
+        }
+
+        // Circular dependency detection
+        if (syncingStack.contains(dependsOn to depKey)) {
+            log.e { "Circular dependency detected: trying to sync $depKey in ${dependsOn.propertyName} again" }
+            throw IllegalStateException("Circular dependency: $depKey already in sync stack")
+        }
+
+        // Get dependency value
+        val depValue = dependsOn[depKey]
+        if (depValue == null && depTimestamp > 0) {
+            // Data integrity issue - FK points to non-existent entry
+            log.w { "Dependency $depKey not found in ${dependsOn.propertyName} (referenced but missing)" }
+            return
+        }
+
+        // Recursively sync dependency first
+        // NOTE: Pass syncingStack as-is, let syncEntryWithDependencies add itself when syncing ITS dependencies
+        log.d { "Syncing dependency: ${dependsOn.propertyName}[$depKey] before current entry" }
+        dependsOn.syncEntryWithDependencies(
+            depKey,
+            depValue,
+            depTimestamp,
+            syncingStack  // Don't add (dependsOn to depKey) here!
+        )
+    }
+}
+
+/**
+ * Builder for declaring foreign key dependencies.
+ * Used in lambda-with-receiver style to declare which Esps instances this entity depends on.
+ */
+class ForeignKeyBuilder<KeyType, ValueType> {
+    private val dependencies = mutableListOf<SyncDependency<ValueType>>()
+
+    /**
+     * Declare a dependency on another Esps instance.
+     *
+     * @param esps The parent Esps that this entity depends on
+     * @param keyExtractor Function to extract the foreign key from this entity's value
+     */
+    fun <FK : Any> dependsOn(
+        esps: Esps<FK, *>,
+        keyExtractor: (ValueType) -> FK?
+    ) {
+        dependencies.add(TypedSyncDependency(esps, keyExtractor))
+    }
+
+    internal fun build(): List<SyncDependency<ValueType>> = dependencies.toList()
+}
+
 @OptIn(ExperimentalTime::class, ExperimentalCoroutinesApi::class)
 open class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
 
@@ -44,7 +136,7 @@ open class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
 
     private val unsyncedKeysMap: MutableMap<KeyType, Long> = mutableMapOf() // Keys that need syncing (timestamp)
     private val syncTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1) // Triggers sync flow
-    
+
     // Sync operation flag - protected by rwLock, no separate synchronization needed
     private var automaticOutwardSync: Boolean = false
 
@@ -53,10 +145,19 @@ open class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
     private val outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit
     private val syncActive: Flow<Boolean>
     private var syncScope: CoroutineScope
+
+    // Foreign key dependencies for sync ordering
+    private val foreignKeyDependencies: List<SyncDependency<ValueType>>
     
     // Track sync jobs for cancellation and restart
     private var inboundJob: Job? = null
     private var outboundJob: Job? = null
+
+    // Track entries currently being synced (prevents duplicate batch sends)
+    private val syncingKeys = mutableSetOf<KeyType>()
+
+    // Completion signals for entries being synced (allows waiting for ongoing syncs)
+    private val syncCompletions = mutableMapOf<KeyType, CompletableDeferred<Unit>>()
 
     // Inbound suppression counter (only accessed under TreeMap write lock)
     private var inboundSuppressionDepth: Int = 0
@@ -73,13 +174,15 @@ open class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
         outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit,
         automaticOutwardSync: Boolean = true,
         syncActive: Flow<Boolean> = MutableStateFlow(true),
-        syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher)
+        syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher),
+        foreignKeys: ForeignKeyBuilder<KeyType, ValueType>.() -> Unit = {}
     ) : super(persisted, sortingBy, secondaryKeys) {
         this.incomingSync = incomingSync
         this.outgoingSync = outgoingSync
         this.automaticOutwardSync = automaticOutwardSync
         this.syncActive = syncActive
         this.syncScope = syncScope
+        this.foreignKeyDependencies = ForeignKeyBuilder<KeyType, ValueType>().apply(foreignKeys).build()
     }
 
 override fun setup() {
@@ -117,16 +220,19 @@ override fun setup() {
                     }
                 }
                 .collect { list ->
-                    list.forEach { (key, value, timestamp) ->
-                        try {
-                            outgoingSync(key, value, timestamp)
-                            withWriteLock {
-                                unsyncedKeysMap.remove(key)
+                    // Process items concurrently to enable batching
+                    // Dependencies are still resolved correctly via syncEntryWithDependencies
+                    coroutineScope {
+                        list.map { (key, value, timestamp) ->
+                            launch {
+                                try {
+                                    syncEntryWithDependencies(key, value, timestamp)
+                                } catch (e: Exception) {
+                                    Logger.e("ESPS sync error for key $key: ${e.message}", e)
+                                    // Leave in unsyncedKeysMap for retry
+                                }
                             }
-                        } catch (e: Exception) {
-                            Logger.e("ESPS sync error for key $key: ${e.message}", e)
-                            // Leave for retry
-                        }
+                        }.joinAll()
                     }
                 }
         }
@@ -222,6 +328,88 @@ override fun fromPersistString(string: String, fileName: String) {
         }
     }
 
+    /**
+     * Get the unsynced timestamp for a key, or null if key is synced.
+     * Used by TypedSyncDependency to check if a parent needs syncing.
+     *
+     * @return Timestamp if unsynced, null if synced or not present
+     */
+    internal suspend fun getUnsyncedTimestamp(key: KeyType): Long? {
+        return withReadLock {
+            unsyncedKeysMap[key]
+        }
+    }
+
+    /**
+     * Sync an entry with dependency resolution.
+     * Recursively syncs all foreign key dependencies before syncing this entry.
+     *
+     * @param key The key to sync
+     * @param value The value to sync (null for deletions)
+     * @param timestamp The sync timestamp
+     * @param syncingStack Stack of (Esps, Key) pairs currently being synced (for circular dependency detection)
+     */
+    internal suspend fun syncEntryWithDependencies(
+        key: KeyType,
+        value: ValueType?,
+        timestamp: Long,
+        syncingStack: Set<Pair<Any, Any>> = emptySet()
+    ) {
+        // Circular dependency guard
+        if (syncingStack.contains(this to key)) {
+            val stackStr = syncingStack.joinToString(" -> ") { (esps, k) ->
+                val espsName = if (esps is Esps<*, *>) "${esps.propertyName}" else esps.toString()
+                "$espsName[$k]"
+            }
+            log.e { "Circular dependency detected while syncing ${propertyName}[$key]! Chain: $stackStr -> ${propertyName}[$key]" }
+            throw IllegalStateException("Circular dependency: $key already being synced")
+        }
+
+        // Check if already syncing (prevents duplicate batch sends)
+        val completion = withWriteLock {
+            if (syncingKeys.contains(key)) {
+                // Already being synced - get the completion to wait for it
+                syncCompletions[key]
+            } else {
+                // Start syncing - create completion and add to tracking
+                val newCompletion = CompletableDeferred<Unit>()
+                syncingKeys.add(key)
+                syncCompletions[key] = newCompletion
+                null  // Indicates we should sync
+            }
+        }
+
+        // If another coroutine is syncing, wait for it to complete
+        if (completion != null) {
+            log.d { "Waiting for ${propertyName}[$key] being synced by another coroutine" }
+            completion.await()
+            return
+        }
+
+        try {
+            // If upserting (not deleting), sync dependencies first
+            if (value != null && foreignKeyDependencies.isNotEmpty()) {
+                for (dependency in foreignKeyDependencies) {
+                    dependency.syncDependencyIfNeeded(value, syncingStack + (this to key))
+                }
+            }
+
+            // All dependencies synced, now sync this entry
+            outgoingSync(key, value, timestamp)
+
+            // Mark as synced on success
+            withWriteLock {
+                unsyncedKeysMap.remove(key)
+            }
+        } finally {
+            // Always remove from syncingKeys and complete deferred (even on failure, so it can be retried later)
+            withWriteLock {
+                syncingKeys.remove(key)
+                syncCompletions.remove(key)?.complete(Unit)
+            }
+        }
+    }
+
     // Primary sync methods removed - use regular operations which auto-mark as unsynced
 
     fun syncEntry(key: KeyType) {
@@ -248,10 +436,7 @@ override fun fromPersistString(string: String, fileName: String) {
         var synced = 0
         entries.forEach { (key, value, timestamp) ->
             try {
-                outgoingSync(key, value, timestamp)
-                withWriteLock {
-                    unsyncedKeysMap.remove(key)
-                }
+                syncEntryWithDependencies(key, value, timestamp)
                 synced++
             } catch (e: Exception) {
                 Logger.e("ESPS immediate sync error for key $key: ${e.message}", e)

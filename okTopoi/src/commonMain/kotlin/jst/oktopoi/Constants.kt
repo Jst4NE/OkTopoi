@@ -2,6 +2,7 @@ package jst.oktopoi
 
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Constants used throughout the OkTopoi library.
@@ -33,12 +34,12 @@ object OkTopoiConstants {
     /**
      * Default sync interval for Esp/Esps periodic synchronization.
      * Syncing occurs on data changes AND at this periodic interval.
-     * 
+     *
      * This interval ensures that unsynced changes are eventually synchronized
      * even if immediate sync attempts fail. The sync system uses both:
      * - Immediate sync on data changes (for low latency)
      * - Periodic sync at this interval (for reliability)
-     * 
+     *
      * ```kotlin
      * // Sync behavior example:
      * val syncedData = esp<UserSettings>(
@@ -48,16 +49,16 @@ object OkTopoiConstants {
      *         sendToRemote(key, value, timestamp)
      *     }
      * )
-     * 
+     *
      * syncedData.value = newSettings  // Immediate sync attempt
-     * // + Periodic sync every 5 minutes as backup
+     * // + Periodic sync every 90 seconds as backup
      * ```
-     * 
+     *
      * Adjust this value based on your sync requirements:
      * - Lower values: More frequent sync, higher network/CPU usage
      * - Higher values: Less frequent sync, potential for data staleness
      */
-    val DEFAULT_SYNC_INTERVAL: Duration = 5.minutes
+    val DEFAULT_SYNC_INTERVAL: Duration = 90.seconds
     
     /**
      * Maximum number of yield() attempts in ReadWriteLock before suspending.
