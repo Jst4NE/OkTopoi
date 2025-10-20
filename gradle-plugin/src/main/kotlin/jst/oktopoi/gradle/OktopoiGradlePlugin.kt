@@ -14,10 +14,8 @@ import org.jetbrains.kotlin.gradle.plugin.SubpluginOption
 
 class OktopoiGradlePlugin : Plugin<Project> {
     override fun apply(target: Project) {
-        // Get version from gradle.properties
-        val oktopoiVersion = target.rootProject.findProperty("oktopoi.version") as String?
-            ?: target.findProperty("oktopoi.version") as String?
-            ?: "1.0.10"  // Fallback version
+        // Use the version baked into the plugin at build time
+        val oktopoiVersion = OktopoiVersion.VERSION
 
         // Apply the compiler plugin
         target.plugins.apply(OktopoiCompilerSubplugin::class.java)
@@ -54,16 +52,11 @@ internal class OktopoiCompilerSubplugin : KotlinCompilerPluginSupportPlugin {
     override fun getCompilerPluginId(): String = "jst.oktopoi.compiler-plugin"
 
     override fun getPluginArtifact(): SubpluginArtifact {
-        // Get version from gradle.properties
-        val project = kotlinCompilation.target.project
-        val oktopoiVersion = project.rootProject.findProperty("oktopoi.version") as String?
-            ?: project.findProperty("oktopoi.version") as String?
-            ?: "1.0.10"  // Fallback version
-
+        // Use the version baked into the plugin at build time
         return SubpluginArtifact(
             groupId = "jst.oktopoi",
             artifactId = "oktopoi-compiler-plugin",
-            version = oktopoiVersion
+            version = OktopoiVersion.VERSION
         )
     }
 
