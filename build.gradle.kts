@@ -98,8 +98,9 @@ tasks.register("release") {
     group = "release"
     description = "Bump patch version, commit, push, and create release tag (all-in-one)"
 
-    // Capture file reference during configuration phase
+    // Capture references during configuration phase
     val gradlePropertiesFile = project.file("gradle.properties")
+    val projectRootDir = project.rootDir
 
     doLast {
 
@@ -213,7 +214,7 @@ tasks.register("release") {
         println()
         println("Publishing to mavenLocal...")
         val publishLocal = ProcessBuilder("./gradlew", "publishToMavenLocal")
-            .directory(project.rootDir)
+            .directory(projectRootDir)
             .inheritIO()
             .start()
         if (publishLocal.waitFor() != 0) {
