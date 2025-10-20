@@ -17,7 +17,7 @@ plugins {
 kotlin {
     jvm()
     androidTarget {
-        publishLibraryVariants("release")
+        publishLibraryVariants("release", "debug")
         @OptIn(ExperimentalKotlinGradlePluginApi::class)
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_1_8)
