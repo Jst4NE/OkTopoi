@@ -21,6 +21,20 @@ allprojects {
     extra["github.token"] = System.getenv("GITHUB_TOKEN") ?: ""
 }
 
+// GitHub Packages requires lowercase artifact IDs
+// Apply to all subprojects after they're fully configured
+gradle.projectsEvaluated {
+    subprojects {
+        plugins.withId("maven-publish") {
+            configure<PublishingExtension> {
+                publications.withType<MavenPublication>().configureEach {
+                    artifactId = artifactId.lowercase()
+                }
+            }
+        }
+    }
+}
+
 // Task to create and push a git release tag matching oktopoi.version
 tasks.register("createReleaseTag") {
     group = "release"

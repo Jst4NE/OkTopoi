@@ -106,14 +106,3 @@ publishing {
         }
     }
 }
-
-// GitHub Packages requires lowercase artifact IDs
-// Use gradle.projectsEvaluated instead of afterEvaluate to catch iOS native publications
-// which are configured later in the build lifecycle
-gradle.projectsEvaluated {
-    publishing {
-        publications.withType<MavenPublication>().configureEach {
-            artifactId = artifactId.lowercase()
-        }
-    }
-}
