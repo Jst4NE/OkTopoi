@@ -1,9 +1,0 @@
-## local.properties.example
-## Copy this file to local.properties and fill in your GitHub credentials
-## local.properties is gitignored and will not be committed
-
-# GitHub credentials for publishing to GitHub Packages
-# Get your Personal Access Token from: https://github.com/settings/tokens
-# Required scopes: write:packages (includes read:packages)
-github.actor=YOUR_GITHUB_USERNAME
-github.token=YOUR_GITHUB_PERSONAL_ACCESS_TOKEN
