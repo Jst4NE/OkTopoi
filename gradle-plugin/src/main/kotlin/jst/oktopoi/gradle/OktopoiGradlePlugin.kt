@@ -14,6 +14,11 @@ import org.jetbrains.kotlin.gradle.plugin.SubpluginOption
 
 class OktopoiGradlePlugin : Plugin<Project> {
     override fun apply(target: Project) {
+        // Get version from gradle.properties
+        val oktopoiVersion = target.rootProject.findProperty("oktopoi.version") as String?
+            ?: target.findProperty("oktopoi.version") as String?
+            ?: "1.0.10"  // Fallback version
+
         // Apply the compiler plugin
         target.plugins.apply(OktopoiCompilerSubplugin::class.java)
 
@@ -22,14 +27,12 @@ class OktopoiGradlePlugin : Plugin<Project> {
             target.extensions.configure<KotlinMultiplatformExtension> {
                 sourceSets.named("commonMain") {
                     dependencies {
-                        implementation("jst.oktopoi:okTopoi:1.0.0")
-//                        implementation("jst.oktopoi:okTopoi:${target.version}")
+                        implementation("jst.oktopoi:oktopoi:$oktopoiVersion")
                     }
                 }
                 sourceSets.named("commonTest") {
                     dependencies {
-                        implementation("jst.oktopoi:okTopoi:1.0.0")
-//                        implementation("jst.oktopoi:okTopoi:${target.version}")
+                        implementation("jst.oktopoi:oktopoi:$oktopoiVersion")
                     }
                 }
             }
@@ -38,10 +41,8 @@ class OktopoiGradlePlugin : Plugin<Project> {
         // Auto-configure dependencies for JVM-only projects
         target.plugins.withType<org.jetbrains.kotlin.gradle.plugin.KotlinPluginWrapper> {
             target.dependencies {
-                add("implementation", "jst.oktopoi:okTopoi:1.0.0")
-                add("testImplementation", "jst.oktopoi:okTopoi:1.0.0")
-//                add("implementation", "jst.oktopoi:okTopoi:${target.version}")
-//                add("testImplementation", "jst.oktopoi:okTopoi:${target.version}")
+                add("implementation", "jst.oktopoi:oktopoi:$oktopoiVersion")
+                add("testImplementation", "jst.oktopoi:oktopoi:$oktopoiVersion")
             }
         }
     }
@@ -52,11 +53,19 @@ internal class OktopoiCompilerSubplugin : KotlinCompilerPluginSupportPlugin {
 
     override fun getCompilerPluginId(): String = "jst.oktopoi.compiler-plugin"
 
-    override fun getPluginArtifact(): SubpluginArtifact = SubpluginArtifact(
-        groupId = "jst.oktopoi",
-        artifactId = "oktopoi-compiler-plugin",
-        version = "1.0.0"
-    )
+    override fun getPluginArtifact(): SubpluginArtifact {
+        // Get version from gradle.properties
+        val project = kotlinCompilation.target.project
+        val oktopoiVersion = project.rootProject.findProperty("oktopoi.version") as String?
+            ?: project.findProperty("oktopoi.version") as String?
+            ?: "1.0.10"  // Fallback version
+
+        return SubpluginArtifact(
+            groupId = "jst.oktopoi",
+            artifactId = "oktopoi-compiler-plugin",
+            version = oktopoiVersion
+        )
+    }
 
     override fun applyToCompilation(
         kotlinCompilation: KotlinCompilation<*>
