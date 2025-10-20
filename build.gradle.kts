@@ -12,9 +12,24 @@ plugins {
     id("maven-publish")
 }
 
+// Load GitHub credentials from local.properties
+val localProperties = java.util.Properties()
+val localPropertiesFile = file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.inputStream().use { localProperties.load(it) }
+}
+
+// Set properties from local.properties or environment variables (environment takes precedence)
+val githubActor = System.getenv("GITHUB_ACTOR") ?: localProperties.getProperty("github.actor")
+val githubToken = System.getenv("GITHUB_TOKEN") ?: localProperties.getProperty("github.token")
+
 allprojects {
     group = "jst.oktopoi"
     version = findProperty("oktopoi.version") as String? ?: "1.0.0-SNAPSHOT"
+
+    // Make GitHub credentials available to all subprojects
+    extra["github.actor"] = githubActor
+    extra["github.token"] = githubToken
 }
 
 // Task to create and push a git release tag matching oktopoi.version
