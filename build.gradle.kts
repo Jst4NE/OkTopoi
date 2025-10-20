@@ -17,8 +17,8 @@ allprojects {
     version = findProperty("oktopoi.version") as String? ?: "1.0.0-SNAPSHOT"
 
     // GitHub credentials from environment (used by GitHub Actions)
-    extra["github.actor"] = System.getenv("GITHUB_ACTOR")
-    extra["github.token"] = System.getenv("GITHUB_TOKEN")
+    extra["github.actor"] = System.getenv("GITHUB_ACTOR") ?: ""
+    extra["github.token"] = System.getenv("GITHUB_TOKEN") ?: ""
 }
 
 // Task to create and push a git release tag matching oktopoi.version
