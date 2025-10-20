@@ -1,0 +1,53 @@
+name: Publish to GitHub Packages
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v1.0.0
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # Required for publishing to GitHub Packages
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Publish all modules to GitHub Packages
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./gradlew publish
+
+      - name: Get version from gradle.properties
+        id: version
+        run: |
+          VERSION=$(grep "^oktopoi.version=" gradle.properties | cut -d'=' -f2)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Summary
+        run: |
+          echo "## Published OkTopoi packages to GitHub Packages" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Git tag:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Modules:**" >> $GITHUB_STEP_SUMMARY
+          echo "  - jst.oktopoi:oktopoi-gradle-plugin:${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "  - jst.oktopoi:oktopoi-compiler-plugin:${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "  - jst.oktopoi:okTopoi:${{ steps.version.outputs.version }} (multiplatform)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "These packages are now available for consumption in projects." >> $GITHUB_STEP_SUMMARY

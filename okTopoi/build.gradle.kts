@@ -101,6 +101,12 @@ dependencies {
 publishing {
     repositories {
         maven {
+            name = "GitHubPackages"
+            url = uri("https://maven.pkg.github.com/Jst4NE/OkTopoi")
+            credentials {
+                username = rootProject.extra["github.actor"] as String?
+                password = rootProject.extra["github.token"] as String?
+            }
         }
     }
 }
