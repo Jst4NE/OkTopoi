@@ -105,4 +105,9 @@ publishing {
             }
         }
     }
+
+    // GitHub Packages requires lowercase artifact IDs
+    publications.withType<MavenPublication> {
+        artifactId = artifactId.lowercase()
+    }
 }
