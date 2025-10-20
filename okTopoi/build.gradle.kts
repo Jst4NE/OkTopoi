@@ -95,11 +95,6 @@ dependencies {
 }
 
 publishing {
-    // GitHub Packages requires lowercase artifact IDs
-    publications.withType<MavenPublication> {
-        artifactId = "oktopoi"
-    }
-
     repositories {
         maven {
             name = "GitHubPackages"
@@ -110,5 +105,14 @@ publishing {
             }
         }
     }
+}
 
+// GitHub Packages requires lowercase artifact IDs
+// Configure after evaluation to ensure Kotlin plugin has set up publications with suffixes
+afterEvaluate {
+    publishing {
+        publications.withType<MavenPublication> {
+            artifactId = artifactId.lowercase()
+        }
+    }
 }
