@@ -211,21 +211,21 @@ tasks.register("release") {
         }
 
         // Publish to mavenLocal
-        println()
-        println("Publishing to mavenLocal...")
-        val publishLocal = ProcessBuilder("./gradlew", "publishToMavenLocal")
-            .directory(projectRootDir)
-            .inheritIO()
-            .start()
-        if (publishLocal.waitFor() != 0) {
-            throw GradleException("Failed to publish to mavenLocal")
-        }
+//        println()
+//        println("Publishing to mavenLocal...")
+//        val publishLocal = ProcessBuilder("./gradlew", "publishToMavenLocal")
+//            .directory(projectRootDir)
+//            .inheritIO()
+//            .start()
+//        if (publishLocal.waitFor() != 0) {
+//            throw GradleException("Failed to publish to mavenLocal")
+//        }
 
         println()
         println("✓ Version bumped from $currentVersion to $newVersion")
         println("✓ Changes committed and pushed")
         println("✓ Tag $tag created and pushed")
-        println("✓ Published to mavenLocal")
+//        println("✓ Published to mavenLocal")
         println("✓ GitHub Actions will now publish OkTopoi packages to GitHub Packages")
 
         // Try to get the repository URL
