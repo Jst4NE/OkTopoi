@@ -110,9 +110,15 @@ publishing {
 // GitHub Packages requires lowercase artifact IDs
 // Configure after evaluation to ensure Kotlin plugin has set up publications with suffixes
 afterEvaluate {
+    println("=== DEBUG: afterEvaluate block running ===")
     publishing {
-        publications.withType<MavenPublication> {
+        println("=== DEBUG: Found ${publications.size} total publications ===")
+        publications.withType<MavenPublication>().configureEach {
+            println("DEBUG: Processing publication: name='$name', artifactId='$artifactId'")
+            val originalArtifactId = artifactId
             artifactId = artifactId.lowercase()
+            println("DEBUG:   -> Changed from '$originalArtifactId' to '$artifactId'")
         }
     }
+    println("=== DEBUG: afterEvaluate block finished ===")
 }
