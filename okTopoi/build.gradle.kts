@@ -95,6 +95,11 @@ dependencies {
 }
 
 publishing {
+    // GitHub Packages requires lowercase artifact IDs
+    publications.withType<MavenPublication> {
+        artifactId = "oktopoi"
+    }
+
     repositories {
         maven {
             name = "GitHubPackages"
@@ -106,8 +111,4 @@ publishing {
         }
     }
 
-    // GitHub Packages requires lowercase artifact IDs
-    publications.withType<MavenPublication> {
-        artifactId = "oktopoi"
-    }
 }
