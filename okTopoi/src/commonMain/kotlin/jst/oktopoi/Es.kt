@@ -249,12 +249,12 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     fun asSnapshotStateList(
         entryComparator: Comparator<Map.Entry<KeyType, ValueType>>? = null,
         filter: ((Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
-        initialEntriesProvider: (() -> Collection<Map.Entry<KeyType, ValueType>>) = { entries },
+        initialEntriesProvider: (suspend () -> Collection<Map.Entry<KeyType, ValueType>>) = { suspend.entries() },
         lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, ValueType>> {
 
-        fun getSortedEntries(): Collection<Map.Entry<KeyType, ValueType>> {
+        suspend fun getSortedEntries(): Collection<Map.Entry<KeyType, ValueType>> {
             // Use efficient provider if available, otherwise default to all entries
             val baseEntries = initialEntriesProvider.invoke()
             
@@ -270,7 +270,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         }
 
         // Stable list identity across recompositions
-        val list = remember(entryComparator, filter) { getSortedEntries().toMutableStateList() }
+        val list = remember { mutableStateListOf<Map.Entry<KeyType, ValueType>>() }
 
         // Create comparator with default fallback
         val entryCmp = remember(entryComparator) { entryComparator ?: Comparator { e1, e2, -> keyComparator.compare(e1.key, e2.key) } }
@@ -384,12 +384,11 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             map.clear()
             val grouped = mutableMapOf<SK, MutableList<Map.Entry<KeyType, ValueType>>>()
 
-            withReadLock {
-                entries.forEach { entry ->
-                    if (filter?.invoke(entry) != false) {
-                        (getSecondaryKey(groupByKey, entry.value) as? SK)?.let { secKeyValue ->
-                            grouped.getOrPut(secKeyValue) { mutableListOf() }.add(entry)
-                        }
+            // Use suspend API to get entries (prevents runBlocking)
+            suspend.entries().forEach { entry ->
+                if (filter?.invoke(entry) != false) {
+                    (getSecondaryKey(groupByKey, entry.value) as? SK)?.let { secKeyValue ->
+                        grouped.getOrPut(secKeyValue) { mutableListOf() }.add(entry)
                     }
                 }
             }
@@ -524,11 +523,13 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, ValueType>> {
 
-        val initialEntriesProvider: () -> List<MapEntry<KeyType, ValueType>> = remember(*criteria) { {
-            val entries = mutableListOf<MapEntry<KeyType, ValueType>>()
-            forEachBy(*criteria) { key, value -> entries.add(MapEntry(key, value)) }
-            entries
-        } }
+        val initialEntriesProvider = remember(*criteria) {
+            suspend {
+                val entries = mutableListOf<MapEntry<KeyType, ValueType>>()
+                suspend.forEachBy(*criteria) { key, value -> entries.add(MapEntry(key, value)) }
+                entries
+            }
+        }
 
         val filterWithCriteria: ((Map.Entry<KeyType, ValueType>) -> Boolean) = { entry ->
             val passesFilter = filter?.invoke(entry) != false
@@ -742,18 +743,17 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
             val results = mutableListOf<Map.Entry<KeyType, T>>()
 
-            withReadLock {
-                entries.forEach { entry ->
-                    val context = JoinContext()
-                    val mappedValue = filterMap(entry, context)
+            // Use suspend API to get entries (prevents runBlocking)
+            suspend.entries().forEach { entry ->
+                val context = JoinContext()
+                val mappedValue = filterMap(entry, context)
 
-                    // Track dependencies regardless of filter result (ensures full reactivity)
-                    dependencyTracker.recordDependencies(entry.key, context.dependencies)
+                // Track dependencies regardless of filter result (ensures full reactivity)
+                dependencyTracker.recordDependencies(entry.key, context.dependencies)
 
-                    // Add to results if passed filter
-                    if (mappedValue != null) {
-                        results.add(MapEntry(entry.key, mappedValue))
-                    }
+                // Add to results if passed filter
+                if (mappedValue != null) {
+                    results.add(MapEntry(entry.key, mappedValue))
                 }
             }
 
@@ -763,7 +763,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
         // Helper: re-evaluate a specific primary entry
         suspend fun reEvaluateEntry(primaryKey: KeyType) {
-            val primaryValue = withReadLock { get(primaryKey) } ?: return
+            val primaryValue = suspend.get(primaryKey) ?: return
             val entry = MapEntry(primaryKey, primaryValue)
 
             val context = JoinContext()
@@ -994,21 +994,20 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
             val grouped = mutableMapOf<SK, MutableList<Map.Entry<KeyType, T>>>()
 
-            withReadLock {
-                entries.forEach { entry ->
-                    val context = JoinContext()
-                    val mappedValue = filterMap(entry, context)
+            // Use suspend API to get entries (prevents runBlocking)
+            suspend.entries().forEach { entry ->
+                val context = JoinContext()
+                val mappedValue = filterMap(entry, context)
 
-                    // Track dependencies regardless of filter result (ensures full reactivity)
-                    dependencyTracker.recordDependencies(entry.key, context.dependencies)
+                // Track dependencies regardless of filter result (ensures full reactivity)
+                dependencyTracker.recordDependencies(entry.key, context.dependencies)
 
-                    // Add to group if passed filter
-                    if (mappedValue != null) {
-                        val groupKey = groupByKey(mappedValue)
-                        if (groupKey != null) {
-                            grouped.getOrPut(groupKey) { mutableListOf() }.add(MapEntry(entry.key, mappedValue))
-                            primaryToGroup[entry.key] = groupKey
-                        }
+                // Add to group if passed filter
+                if (mappedValue != null) {
+                    val groupKey = groupByKey(mappedValue)
+                    if (groupKey != null) {
+                        grouped.getOrPut(groupKey) { mutableListOf() }.add(MapEntry(entry.key, mappedValue))
+                        primaryToGroup[entry.key] = groupKey
                     }
                 }
             }
@@ -1021,7 +1020,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
         // Helper: re-evaluate a specific primary entry
         suspend fun reEvaluateEntry(primaryKey: KeyType) {
-            val primaryValue = withReadLock { get(primaryKey) } ?: return
+            val primaryValue = suspend.get(primaryKey) ?: return
             val entry = MapEntry(primaryKey, primaryValue)
 
             val context = JoinContext()

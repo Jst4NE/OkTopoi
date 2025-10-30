@@ -86,8 +86,8 @@ class TypedSyncDependency<ThisValueType, DepKeyType : Any, DepValueType : Any>(
             throw IllegalStateException("Circular dependency: $depKey already in sync stack")
         }
 
-        // Get dependency value
-        val depValue = dependsOn[depKey]
+        // Get dependency value using suspend API (prevents runBlocking in suspend context)
+        val depValue = dependsOn.suspend.get(depKey)
         if (depValue == null && depTimestamp > 0) {
             // Data integrity issue - FK points to non-existent entry
             log.w { "Dependency $depKey not found in ${dependsOn.propertyName} (referenced but missing)" }

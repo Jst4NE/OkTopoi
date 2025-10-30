@@ -8,4 +8,4 @@ import kotlinx.coroutines.runBlocking
 
 actual val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 
-actual fun <T> runBlockingMultiplatform(block: suspend CoroutineScope.() -> T): T = runBlocking(block = block)
+actual fun <T> runBlockingMultiplatform(block: suspend CoroutineScope.() -> T): T = runBlocking(ioDispatcher, block = block)

@@ -807,6 +807,10 @@ open class TreeMap<K, V> internal constructor(
         
         val entries: MutableSet<MapEntry<K, V>> 
             get() = runBlockingMultiplatform { rwLock.withReadLock { entriesUnsafe() } }
+
+        suspend fun entries(): MutableSet<MapEntry<K, V>> {
+            return rwLock.withReadLock { entriesUnsafe() }
+        }
     }
     
     // ========================================================================
