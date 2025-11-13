@@ -113,6 +113,8 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
                             synchronized(lock) {
                                 syncTimestamp = 0L // Mark as synced
                             }
+                            // Persist the updated sync state to avoid re-sync on app restart
+                            persistValue(super.value)
                         } catch (e: Exception) {
                             Logger.e("OkTopoi-Esp", e) { "Error in outbound sync for $propertyId" }
                         }

@@ -132,7 +132,7 @@ open class UnsafeTreeMapCore<K, V> internal constructor(
      */
     protected val isEmptyUnsafe: Boolean get() = _size == 0
 
-    protected open fun isEmpty(): Boolean = isEmptyUnsafe
+    protected open suspend fun isEmpty(): Boolean = isEmptyUnsafe
     
     
     

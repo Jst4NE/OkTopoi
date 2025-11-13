@@ -87,7 +87,7 @@ class TypedSyncDependency<ThisValueType, DepKeyType : Any, DepValueType : Any>(
         }
 
         // Get dependency value using suspend API (prevents runBlocking in suspend context)
-        val depValue = dependsOn.suspend.get(depKey)
+        val depValue = dependsOn.get(depKey)
         if (depValue == null && depTimestamp > 0) {
             // Data integrity issue - FK points to non-existent entry
             log.w { "Dependency $depKey not found in ${dependsOn.propertyName} (referenced but missing)" }
@@ -397,9 +397,14 @@ override fun fromPersistString(string: String, fileName: String) {
             // All dependencies synced, now sync this entry
             outgoingSync(key, value, timestamp)
 
-            // Mark as synced on success
+            // Mark as synced on success and persist the updated sync state
             withWriteLock {
                 unsyncedKeysMap.remove(key)
+                // Persist the entry with syncTimestamp=0 to avoid re-sync on app restart
+                // For deletions: this[key] is null, so persistEntry will delete the tombstone file
+                // For upserts: this[key] still exists, so persistEntry will write syncTimestamp=0
+                // Use getUnsafe to avoid deadlock (we're already holding write lock)
+                persistEntry(key, value)
             }
         } finally {
             // Always remove from syncingKeys and complete deferred (even on failure, so it can be retried later)

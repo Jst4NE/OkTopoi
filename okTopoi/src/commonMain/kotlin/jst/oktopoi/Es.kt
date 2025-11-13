@@ -2,7 +2,10 @@ package jst.oktopoi
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.snapshots.SnapshotStateMap
@@ -16,13 +19,13 @@ import jst.oktopoi.TreeMap.MapChange.Cleared
 import jst.oktopoi.TreeMap.MapChange.Put
 import jst.oktopoi.TreeMap.MapChange.Rebuild
 import jst.oktopoi.TreeMap.MapChange.Removed
-import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
+import kotlin.text.set
 
 /**
  * Reactive observable collection that extends TreeMap with change notifications and UI integrations.
@@ -248,8 +251,8 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     @Composable
     fun asSnapshotStateList(
         entryComparator: Comparator<Map.Entry<KeyType, ValueType>>? = null,
-        filter: ((Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
-        initialEntriesProvider: (suspend () -> Collection<Map.Entry<KeyType, ValueType>>) = { suspend.entries() },
+        filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        initialEntriesProvider: (suspend () -> Collection<Map.Entry<KeyType, ValueType>>) = { entries() },
         lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, ValueType>> {
@@ -259,7 +262,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             val baseEntries = initialEntriesProvider.invoke()
             
             // Apply filter if provided
-            val filteredEntries = filter?.let { baseEntries.filter(it) } ?: baseEntries
+            val filteredEntries = filter?.let { f -> baseEntries.filter { f.invoke(it) } } ?: baseEntries
             
             // Sort only if custom comparator provided (TreeMap's primary key order is already correct)
             return if (entryComparator != null) {
@@ -357,7 +360,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     fun <SK : Any> asSnapshotStateMapBySecondaryKey(
         groupByKey: String,
         entryComparator: Comparator<Map.Entry<KeyType, ValueType>>,
-        filter: ((Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
         lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateMap<SK, SnapshotStateList<Map.Entry<KeyType, ValueType>>> {
@@ -385,7 +388,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             val grouped = mutableMapOf<SK, MutableList<Map.Entry<KeyType, ValueType>>>()
 
             // Use suspend API to get entries (prevents runBlocking)
-            suspend.entries().forEach { entry ->
+            entries().forEach { entry ->
                 if (filter?.invoke(entry) != false) {
                     (getSecondaryKey(groupByKey, entry.value) as? SK)?.let { secKeyValue ->
                         grouped.getOrPut(secKeyValue) { mutableListOf() }.add(entry)
@@ -518,7 +521,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     fun asSnapshotStateListBySecondaryKey(
         vararg criteria: Pair<String, Any?>,
         entryComparator: Comparator<Map.Entry<KeyType, ValueType>>,
-        filter: ((Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
         lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, ValueType>> {
@@ -526,12 +529,12 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         val initialEntriesProvider = remember(*criteria) {
             suspend {
                 val entries = mutableListOf<MapEntry<KeyType, ValueType>>()
-                suspend.forEachBy(*criteria) { key, value -> entries.add(MapEntry(key, value)) }
+                forEachBy(*criteria) { key, value -> entries.add(MapEntry(key, value)) }
                 entries
             }
         }
 
-        val filterWithCriteria: ((Map.Entry<KeyType, ValueType>) -> Boolean) = { entry ->
+        val filterWithCriteria: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean) = { entry ->
             val passesFilter = filter?.invoke(entry) != false
             val passesCriteria = criteria.all { (indexName, expectedValue) ->
                 getSecondaryKey(indexName, entry.value) == expectedValue
@@ -599,7 +602,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     @Composable
     fun asSnapshotStateListBySecondaryKey(
         vararg criteria: Pair<String, Comparable<*>?>,
-        filter: ((Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
         lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, ValueType>> {
@@ -626,6 +629,361 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             lifecycleOwner = lifecycleOwner,
             minActiveState = minActiveState
         )
+    }
+
+    /**
+     * Creates a reactive State for a single key that automatically updates when the value changes.
+     *
+     * This function provides reactive access to individual entries, ideal for Composables that need
+     * to display or react to a single entity. The State will update whenever the value associated
+     * with the key is added, updated, or removed.
+     *
+     * ## Performance
+     *
+     * - Initial fetch: O(log n)
+     * - Updates: O(1) filtering on change events
+     * - Memory: Single State<ValueType?> object per key
+     *
+     * ## Reactivity
+     *
+     * The State updates on:
+     * - Put: When the key is added or updated
+     * - Removed: When the key is removed (value becomes null)
+     * - Cleared: All keys removed (value becomes null)
+     * - Rebuild: Full resync (refetches current value)
+     *
+     * ## Usage
+     *
+     * ```kotlin
+     * @Composable
+     * fun DriverCard(driverId: Long) {
+     *     val driver by Data.drivers.asState(driverId)
+     *
+     *     Text(driver?.let { "${it.firstName} ${it.lastName}" } ?: "Unknown")
+     * }
+     * ```
+     *
+     * @param key the key to observe
+     * @return reactive State that updates when the value changes
+     */
+    @Composable
+    fun asState(key: KeyType): State<ValueType?> {
+        val state = remember(key) { mutableStateOf<ValueType?>(null) }
+
+        LaunchedEffect(key) {
+            // Initial fetch
+            state.value = get(key)
+
+            // Observe changes for this specific key
+            changes.collect { change ->
+                when (change) {
+                    is Put -> if (change.key == key) state.value = change.value
+                    is Removed -> if (change.key == key) state.value = null
+                    is Cleared -> state.value = null
+                    is Rebuild -> state.value = get(key)
+                }
+            }
+        }
+
+        return state
+    }
+
+    @Composable
+    fun asState(key: KeyType, initialValue: ValueType? = null): State<ValueType?> {
+        val state = remember(key) { mutableStateOf(initialValue) }
+
+        LaunchedEffect(key) {
+            // Observe changes for this specific key
+            changes.collect { change ->
+                when (change) {
+                    is Put -> if (change.key == key) state.value = change.value
+                    is Removed -> if (change.key == key) state.value = null
+                    is Cleared -> state.value = null
+                    is Rebuild -> state.value = get(key)
+                }
+            }
+        }
+
+        return state
+    }
+
+    /**
+     * Creates a non-reactive State snapshot of a value at a specific key.
+     *
+     * This function fetches the current value for a key and returns it as a State, but does NOT
+     * subscribe to changes. The State will not update if the value changes later. Use this when
+     * you need the value in a Composable context but don't need reactivity.
+     *
+     * ## Performance
+     *
+     * - Initial fetch: O(log n)
+     * - Updates: None (non-reactive)
+     * - Memory: Single State<ValueType?> object per key
+     *
+     * ## Use Cases
+     *
+     * - Displaying static/historical data that won't change
+     * - Fetching related entities in a LaunchedEffect or derived computation
+     * - When reactivity would cause unwanted recompositions
+     *
+     * ## Usage
+     *
+     * ```kotlin
+     * @Composable
+     * fun JourneyHeader(journeyId: Long) {
+     *     val journey by Data.journeys.getState(journeyId)
+     *
+     *     // Displays journey info at time of composition, won't update if journey changes
+     *     Text("Journey from ${journey?.startTime}")
+     * }
+     * ```
+     *
+     * @param key the key to fetch
+     * @return non-reactive State with the current value (or null if not found)
+     */
+    @Composable
+    fun getState(key: KeyType): State<ValueType?> {
+        val state = remember(key) { mutableStateOf<ValueType?>(null) }
+
+        LaunchedEffect(key) {
+            state.value = get(key)
+        }
+
+        return state
+    }
+
+    /**
+     * Creates a reactive State that transforms a value at a specific key using a suspend function.
+     *
+     * This function fetches the value for a key and applies a transformation, then returns the result
+     * as a State. The State automatically updates when either the source value changes OR when any
+     * of the specified dependencies change. This is ideal for computing derived values that depend
+     * on both the entity data and external context (like formatting, locale, timezone, etc.).
+     *
+     * ## Key Features
+     *
+     * - **Reactive to source changes**: Updates automatically when the value at the key changes
+     * - **Reactive to dependencies**: Updates when any dependency changes (e.g., locale, timezone)
+     * - **Suspend transform**: Can call other suspend functions (e.g., fetching related data)
+     * - **Null-safe**: Handles null values gracefully, passing them to the transform
+     * - **Lifecycle-aware**: Properly cancels when the composition leaves
+     *
+     * ## Performance
+     *
+     * - Initial fetch + transform: O(log n) + transform cost
+     * - On source change: O(log n) + transform cost
+     * - On dependency change: transform cost only (no fetch needed)
+     * - Memory: Single State<T?> object per usage
+     *
+     * ## Use Cases
+     *
+     * - Computing display names that require async lookups
+     * - Formatting values based on locale/timezone/user preferences
+     * - Deriving values that depend on related entities
+     * - Any transformation requiring suspend functions
+     *
+     * ## Usage
+     *
+     * ```kotlin
+     * // Basic usage - async transformation
+     * @Composable
+     * fun JourneyHeader(journeyId: Long) {
+     *     val displayName by Data.journeys.mapState(journeyId) { journey ->
+     *         journey?.getDisplayName()  // suspend function
+     *     }
+     *     Text(displayName ?: "Unknown")
+     * }
+     *
+     * // With dependencies - recompute when context changes
+     * @Composable
+     * fun FormattedDate(journeyId: Long) {
+     *     val timezone = TimeZone.currentSystemDefault()
+     *     val locale = LocaleList.current[0]
+     *
+     *     val formattedDate by Data.journeys.mapState(journeyId, timezone, locale) { journey ->
+     *         journey?.startTime?.format(timezone, locale)
+     *     }
+     *     Text(formattedDate ?: "")
+     * }
+     *
+     * // Chaining async operations
+     * @Composable
+     * fun DriverName(journeyId: Long) {
+     *     val driverName by Data.journeys.mapState(journeyId) { journey ->
+     *         journey?.let {
+     *             val driver = Data.drivers.get(it.driverId)
+     *             "${driver?.firstName} ${driver?.lastName}"
+     *         }
+     *     }
+     *     Text(driverName ?: "No driver")
+     * }
+     * ```
+     *
+     * ## Comparison with `asState`
+     *
+     * - `asState(key)`: Returns raw value, no transformation
+     * - `mapState(key) { transform }`: Returns transformed value with suspend support
+     *
+     * @param key the key to observe
+     * @param dependencies optional dependencies that trigger re-transformation when changed
+     * @param transform suspend function to transform the value (receives null if key not found)
+     * @return reactive State that updates when source or dependencies change
+     */
+    @Composable
+    fun <T> mapState(
+        key: KeyType,
+        vararg dependencies: Any?,
+        transform: suspend (ValueType?) -> T?
+    ): State<T?> {
+        val sourceState = asState(key)
+        val transformedState = remember { mutableStateOf<T?>(null) }
+
+        LaunchedEffect(sourceState.value, *dependencies) {
+            transformedState.value = transform(sourceState.value)
+        }
+
+        return transformedState
+    }
+
+    /**
+     * Creates a reactive State that transforms a value at a specific key using a suspend function,
+     * with an initial value to prevent null state during first fetch.
+     *
+     * This overload is identical to `mapState(key, dependencies, transform)` but accepts an
+     * `initialValue` that will be used immediately until the actual value is fetched. This is
+     * useful for preventing flickering or showing placeholder data during the initial load.
+     *
+     * ## Key Differences from Base mapState
+     *
+     * - **Initial state**: Uses `initialValue` immediately instead of null
+     * - **First render**: Shows transformed `initialValue` before actual data arrives
+     * - **Use case**: Prevent flicker when you have a reasonable default/placeholder
+     *
+     * ## Use Cases
+     *
+     * - Showing placeholder data during initial load
+     * - Pre-filling forms with default values
+     * - Preventing "flash of empty content"
+     * - Any scenario where null state is undesirable
+     *
+     * ## Example
+     *
+     * ```kotlin
+     * @Composable
+     * fun JourneyCard(journeyId: Long) {
+     *     // Use placeholder journey to prevent empty state during load
+     *     val placeholderJourney = JourneyDto(id = journeyId, startTime = Clock.System.now(), ...)
+     *
+     *     val displayName by Data.journeys.mapState(
+     *         key = journeyId,
+     *         initialValue = placeholderJourney
+     *     ) { journey ->
+     *         journey?.getDisplayName() ?: "Loading..."
+     *     }
+     *     Text(displayName)
+     * }
+     * ```
+     *
+     * @param key the key to observe
+     * @param initialValue the initial value to use before actual data is fetched
+     * @param dependencies optional dependencies that trigger re-transformation when changed
+     * @param transform suspend function to transform the value
+     * @return reactive State that updates when source or dependencies change
+     */
+    @Composable
+    fun <T> mapState(
+        key: KeyType,
+        initialValue: ValueType? = null,
+        vararg dependencies: Any?,
+        transform: suspend (ValueType?) -> T?
+    ): State<T?> {
+        val sourceState = asState(key, initialValue)
+        val transformedState = remember { mutableStateOf<T?>(null) }
+
+        LaunchedEffect(sourceState.value, *dependencies) {
+            transformedState.value = transform(sourceState.value)
+        }
+
+        return transformedState
+    }
+
+    /**
+     * Creates a reactive State by transforming the entire Es collection using a suspend function.
+     *
+     * Unlike other `mapState` overloads that operate on a single key, this variant passes the
+     * entire Es collection to your transform function. This is ideal for aggregations, filtering,
+     * or any operation that needs to query multiple entries at once.
+     *
+     * **Important**: This does NOT automatically track changes to the collection. It only
+     * re-executes when the specified `dependencies` change. For reactive collection queries,
+     * prefer `asSnapshotStateList()` or `asSnapshotStateListWithJoins()`.
+     *
+     * ## Key Features
+     *
+     * - **Collection-wide access**: Transform operates on entire Es, can query any entries
+     * - **Manual reactivity**: Only re-executes when dependencies change (not on data changes)
+     * - **Suspend support**: Can perform async operations during transformation
+     * - **Aggregation-friendly**: Perfect for counts, sums, or multi-entry computations
+     *
+     * ## Use Cases
+     *
+     * - Computing aggregates (count, sum, average) based on external filters
+     * - Finding specific entries based on complex criteria
+     * - Operations that depend on external state but don't need automatic reactivity
+     * - One-time or manually-triggered queries
+     *
+     * ## Example
+     *
+     * ```kotlin
+     * @Composable
+     * fun StatisticsPanel(selectedDriverId: Long?, selectedMonth: Int) {
+     *     // Recompute when filter changes, not when journeys change
+     *     val completedCount by Data.journeys.mapState(selectedDriverId, selectedMonth) { journeys ->
+     *         journeys.values()
+     *             .filter { it.driverId == selectedDriverId }
+     *             .filter { it.startTime.month == selectedMonth }
+     *             .count { it.status == JourneyStatus.COMPLETED }
+     *     }
+     *     Text("Completed: $completedCount")
+     * }
+     *
+     * // Alternative with suspend operations
+     * @Composable
+     * fun TotalDistance(driverId: Long) {
+     *     val distance by Data.journeys.mapState(driverId) { journeys ->
+     *         journeys.values()
+     *             .filter { it.driverId == driverId }
+     *             .sumOf { journey ->
+     *                 // Can call suspend functions
+     *                 journey.computeDistance()
+     *             }
+     *     }
+     *     Text("Total: ${distance}km")
+     * }
+     * ```
+     *
+     * ## When NOT to Use
+     *
+     * - **Reactive lists**: Use `asSnapshotStateList()` instead for automatic updates
+     * - **Single entity**: Use `mapState(key)` if you only need one entry
+     * - **Joined queries**: Use `asSnapshotStateListWithJoins()` for multi-collection queries
+     *
+     * @param dependencies optional dependencies that trigger re-transformation when changed
+     * @param transform suspend function that receives the Es collection and returns computed value
+     * @return reactive State that updates only when dependencies change
+     */
+    @Composable
+    fun <T> mapState(
+        vararg dependencies: Any?,
+        transform: suspend (Es<KeyType, ValueType>) -> T?
+    ): State<T?> {
+        val transformedState = remember { mutableStateOf<T?>(null) }
+
+        LaunchedEffect(*dependencies) {
+            transformedState.value = transform(this@Es)
+        }
+
+        return transformedState
     }
 
     /**
@@ -721,7 +1079,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     @Composable
     fun <T : Any> asSnapshotStateListWithJoins(
         entryComparator: Comparator<Map.Entry<KeyType, T>>,
-        filterMap: (entry: Map.Entry<KeyType, ValueType>, context: JoinContext) -> T?,
+        filterMap: suspend (entry: Map.Entry<KeyType, ValueType>, context: JoinContext) -> T?,
         lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, T>> {
@@ -744,7 +1102,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             val results = mutableListOf<Map.Entry<KeyType, T>>()
 
             // Use suspend API to get entries (prevents runBlocking)
-            suspend.entries().forEach { entry ->
+            entries().forEach { entry ->
                 val context = JoinContext()
                 val mappedValue = filterMap(entry, context)
 
@@ -763,7 +1121,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
         // Helper: re-evaluate a specific primary entry
         suspend fun reEvaluateEntry(primaryKey: KeyType) {
-            val primaryValue = suspend.get(primaryKey) ?: return
+            val primaryValue = get(primaryKey) ?: return
             val entry = MapEntry(primaryKey, primaryValue)
 
             val context = JoinContext()
@@ -956,7 +1314,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     fun <SK : Any, T : Any> asSnapshotStateMapWithJoins(
         groupByKey: (T) -> SK?,
         entryComparator: Comparator<Map.Entry<KeyType, T>>,
-        filterMap: (entry: Map.Entry<KeyType, ValueType>, context: JoinContext) -> T?,
+        filterMap: suspend (entry: Map.Entry<KeyType, ValueType>, context: JoinContext) -> T?,
         lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateMap<SK, SnapshotStateList<Map.Entry<KeyType, T>>> {
@@ -995,7 +1353,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             val grouped = mutableMapOf<SK, MutableList<Map.Entry<KeyType, T>>>()
 
             // Use suspend API to get entries (prevents runBlocking)
-            suspend.entries().forEach { entry ->
+            entries().forEach { entry ->
                 val context = JoinContext()
                 val mappedValue = filterMap(entry, context)
 
@@ -1020,7 +1378,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
         // Helper: re-evaluate a specific primary entry
         suspend fun reEvaluateEntry(primaryKey: KeyType) {
-            val primaryValue = suspend.get(primaryKey) ?: return
+            val primaryValue = get(primaryKey) ?: return
             val entry = MapEntry(primaryKey, primaryValue)
 
             val context = JoinContext()
@@ -1140,6 +1498,146 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         return resultMap
     }
 
+    /**
+     * Creates a reactive SnapshotStateMap where each value is transformed using a suspend function.
+     *
+     * This method transforms each entry in the Es collection independently, providing efficient
+     * granular reactivity. When an entry changes, only that entry's transformation re-executes.
+     * When dependencies change, all entries are re-transformed.
+     *
+     * ## Key Features
+     *
+     * - **Granular reactivity**: Only affected entries re-transform when data changes
+     * - **Suspend transformation**: Can call suspend functions during transformation
+     * - **Null filtering**: Null results are automatically excluded from the result map
+     * - **Dependency tracking**: Re-transform all entries when dependencies change
+     * - **Efficient updates**: O(1) updates when single entries change
+     *
+     * ## Use Cases
+     *
+     * - Pre-computing display names for all entities in a collection
+     * - Transforming entities with suspend operations (fetch related data, format, etc.)
+     * - Creating lookup maps with transformed values
+     * - Any scenario where you need a reactive map of transformed values
+     *
+     * ## Example - Display Names
+     *
+     * ```kotlin
+     * @Composable
+     * fun WarehouseSelector() {
+     *     // Pre-compute display names for all warehouses
+     *     val warehouseDisplayNames = Data.warehouses.asSnapshotStateMapTransformed { entry ->
+     *         entry.value.getDisplayName()  // suspend function
+     *     }
+     *
+     *     val warehouses = Data.warehouses.asSnapshotStateList()
+     *
+     *     SearchableExposedDropdownMenu(
+     *         items = warehouses.map { it.value },
+     *         displayText = { warehouse ->
+     *             // Fast O(1) lookup of pre-computed display name
+     *             warehouseDisplayNames[warehouse.id] ?: warehouse.name
+     *         }
+     *     )
+     * }
+     * ```
+     *
+     * ## Example - With Dependencies
+     *
+     * ```kotlin
+     * @Composable
+     * fun LocalizedEntityNames(locale: Locale) {
+     *     // Re-transform all when locale changes
+     *     val entityNames = Data.entities.asSnapshotStateMapTransformed(locale) { entry ->
+     *         entry.value.getLocalizedName(locale)  // suspend, depends on locale
+     *     }
+     *
+     *     // entityNames automatically updates when:
+     *     // - Individual entity changes (only that entry re-transforms)
+     *     // - Locale changes (all entries re-transform)
+     * }
+     * ```
+     *
+     * ## Null Handling
+     *
+     * If the transform returns null for an entry, that entry is excluded from the result map.
+     * When an entry is updated and transform returns null, it's removed from the map.
+     *
+     * ## Performance
+     *
+     * - Initial population: O(n) where n = number of entries
+     * - Single entry update: O(1) + transform cost
+     * - Dependency change: O(n) (re-transforms all entries)
+     * - Memory: O(n) for the result map
+     *
+     * ## Comparison with Similar Methods
+     *
+     * - `mapState(key)`: Single entry transformation
+     * - `asSnapshotStateMapTransformed()`: Entire collection transformation (this method)
+     * - `asSnapshotStateListWithJoins()`: List with multi-source joins
+     * - `rememberSuspendTransformed()`: Transform a single object you already have
+     *
+     * @param R the type of the transformed result values
+     * @param dependencies optional dependencies that trigger re-transformation of all entries when changed
+     * @param transform suspend function that transforms each entry (receives full Map.Entry with key and value)
+     * @return reactive SnapshotStateMap<KeyType, R> that updates when entries or dependencies change
+     */
+    @Composable
+    fun <R : Any> asSnapshotStateMapTransformed(
+        vararg dependencies: Any?,
+        transform: suspend (Map.Entry<KeyType, ValueType>) -> R?
+    ): SnapshotStateMap<KeyType, R> {
+        val resultMap = remember { mutableStateMapOf<KeyType, R>() }
+
+        LaunchedEffect(*dependencies) {
+            // Clear and rebuild when dependencies change
+            resultMap.clear()
+            entries().forEach { entry ->
+                val transformed = transform(entry)
+                if (transformed != null) {
+                    resultMap[entry.key] = transformed
+                }
+            }
+
+            // Then listen to ongoing changes
+            changes.collect { change ->
+                when (change) {
+                    is TreeMap.MapChange.Put -> {
+                        // Create Map.Entry for the changed value
+                        val entry = object : Map.Entry<KeyType, ValueType> {
+                            override val key = change.key
+                            override val value = change.value
+                        }
+                        val transformed = transform(entry)
+                        if (transformed != null) {
+                            resultMap[change.key] = transformed
+                        } else {
+                            resultMap.remove(change.key)
+                        }
+                    }
+                    is TreeMap.MapChange.Removed -> {
+                        resultMap.remove(change.key)
+                    }
+                    is TreeMap.MapChange.Cleared -> {
+                        resultMap.clear()
+                    }
+                    is TreeMap.MapChange.Rebuild -> {
+                        // Rebuild entire map
+                        resultMap.clear()
+                        entries().forEach { entry ->
+                            val transformed = transform(entry)
+                            if (transformed != null) {
+                                resultMap[entry.key] = transformed
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return resultMap
+    }
+
 }
 
 // ============================================================================
@@ -1159,12 +1657,12 @@ class JoinContext internal constructor() {
      * @param key the key to fetch
      * @return the value if found, null otherwise
      */
-    fun <K : Any, V : Any> fetch(es: Es<K, V>, key: K): V? {
+    suspend fun <K : Any, V : Any> fetch(es: Es<K, V>, key: K): V? {
         // Record dependency
         dependencies.add(es to key)
 
-        // Fetch value
-        return es[key]
+        // Fetch value using suspend API (non-blocking)
+        return es.get(key)
     }
 }
 
@@ -1364,11 +1862,11 @@ private fun <K : Any, V : Any> findIndexInSortedList(
  * Helper to handle Put event for a single SnapshotStateList.
  * Extracted to share logic between asSnapshotStateList and asSnapshotStateMapBySecondaryKey.
  */
-private fun <K : Any, V : Any> handlePutInSortedList(
+private suspend fun <K : Any, V : Any> handlePutInSortedList(
     list: SnapshotStateList<Map.Entry<K, V>>,
     change: TreeMap.MapChange.Put<K, V>,
     comparator: Comparator<Map.Entry<K, V>>,
-    filter: ((Map.Entry<K, V>) -> Boolean)?
+    filter: (suspend (Map.Entry<K, V>) -> Boolean)?
 ) {
     val entry = MapEntry(change.key, change.value)
     val passes = filter?.invoke(entry) != false
@@ -1396,5 +1894,187 @@ private fun <K : Any, V : Any> handleRemoveInSortedList(
 ) {
     val index = findIndexInSortedList(list, change.key, change.oldValue, comparator, false)
     if (index >= 0) list.removeAt(index)
+}
+
+// ============================================================================
+// General-purpose transformation utilities
+// ============================================================================
+
+/**
+ * Creates a reactive State by transforming a value with a regular (non-suspend) function.
+ *
+ * The transformation is recomputed immediately when the value or dependencies change.
+ * Use this for fast, synchronous transformations (formatting, string operations, calculations, etc.).
+ *
+ * ## Key Features
+ *
+ * - **Immediate computation**: Transform is evaluated synchronously during composition
+ * - **No null intermediate state**: State is created with the transformed value already computed
+ * - **Reactive to changes**: Recomputes when value or dependencies change
+ * - **Type-safe**: Full Kotlin type inference support
+ *
+ * ## Performance
+ *
+ * - Initial computation: Synchronous, happens immediately during composition
+ * - On value/dependency change: O(1) + transform cost
+ * - Memory: Single State<R?> object per usage
+ *
+ * ## Use Cases
+ *
+ * - Simple transformations that don't require suspend (uppercase, formatting, etc.)
+ * - Extracting/combining properties from an object
+ * - Mathematical calculations or string operations
+ * - Transformations that depend on external context (locale, theme, user preferences)
+ *
+ * ## Example
+ *
+ * ```kotlin
+ * @Composable
+ * fun WarehouseCard(warehouse: WarehouseDto) {
+ *     val locale = Locale.current
+ *     val theme = MaterialTheme.colorScheme
+ *
+ *     // Simple property access
+ *     val formattedName by rememberTransformed(warehouse) {
+ *         it.name.uppercase()
+ *     }
+ *
+ *     // With dependencies - recompute when locale changes
+ *     val localizedName by rememberTransformed(warehouse, locale) {
+ *         it.name.uppercase(locale)
+ *     }
+ *
+ *     // Combining multiple properties
+ *     val summary by rememberTransformed(warehouse) {
+ *         "${it.name} (${it.partner.company})"
+ *     }
+ *
+ *     Text(formattedName)
+ * }
+ * ```
+ *
+ * ## Comparison with rememberSuspendTransformed
+ *
+ * - `rememberTransformed`: For synchronous, fast transformations (no suspend)
+ * - `rememberSuspendTransformed`: For async transformations (with suspend support)
+ *
+ * @param T the type of the input value
+ * @param R the type of the transformed result
+ * @param value the value to transform
+ * @param dependencies optional dependencies that trigger re-transformation when changed
+ * @param transform function to transform the value (receives value, returns transformed result or null)
+ * @return reactive State that updates when value or dependencies change
+ */
+@Composable
+fun <T, R> rememberTransformed(
+    value: T,
+    vararg dependencies: Any?,
+    transform: (T) -> R?
+): State<R?> {
+    return remember(value, *dependencies) {
+        mutableStateOf(transform(value))
+    }
+}
+
+/**
+ * Creates a reactive State by transforming a value with a suspend function.
+ *
+ * The transformation is recomputed asynchronously when the value or dependencies change.
+ * Use this for transformations that need to call suspend functions (database lookups,
+ * async computations, etc.).
+ *
+ * ## Key Features
+ *
+ * - **Async transformation**: Can call suspend functions during transformation
+ * - **Reactive to changes**: Re-executes when value or dependencies change
+ * - **Lifecycle-aware**: Properly cancels when composition leaves
+ * - **Null-safe**: Handles null results gracefully
+ *
+ * ## Performance
+ *
+ * - Initial computation: Async, happens in LaunchedEffect
+ * - On value/dependency change: Async re-execution + transform cost
+ * - Memory: Single State<R?> object per usage
+ *
+ * ## Use Cases
+ *
+ * - Calling suspend extension functions on objects (getDisplayName, computeProgress, etc.)
+ * - Fetching related data from Es collections or databases
+ * - Any async transformation or computation
+ * - Transformations requiring I/O operations
+ *
+ * ## Example
+ *
+ * ```kotlin
+ * @Composable
+ * fun WarehouseCard(warehouse: WarehouseDto) {
+ *     // Call suspend extension function
+ *     val displayName by rememberSuspendTransformed(warehouse) {
+ *         it.getDisplayName()  // suspend function
+ *     }
+ *
+ *     // Fetch related data
+ *     val partnerName by rememberSuspendTransformed(warehouse) {
+ *         val partner = Data.partners.get(it.partnerId)
+ *         partner?.company ?: "Unknown"
+ *     }
+ *
+ *     // Complex async computation
+ *     val shellInfo by rememberSuspendTransformed(warehouse) {
+ *         warehouse.externalId?.let { stationId ->
+ *             val station = Data.shellStations.get(stationId)
+ *             station?.let { "${it.name} - ${it.city}" }
+ *         }
+ *     }
+ *
+ *     Text(displayName ?: warehouse.name)
+ *     Text(partnerName)
+ * }
+ *
+ * // With dependencies
+ * @Composable
+ * fun JourneyProgress(journey: JourneyDto, refresh: Boolean) {
+ *     // Recompute when refresh changes
+ *     val progress by rememberSuspendTransformed(journey, refresh) {
+ *         it.computeProgress()  // suspend function
+ *     }
+ *
+ *     CircularProgressIndicator(progress = progress ?: 0f)
+ * }
+ * ```
+ *
+ * ## Comparison with rememberTransformed
+ *
+ * - `rememberTransformed`: For synchronous, fast transformations (no suspend)
+ * - `rememberSuspendTransformed`: For async transformations (with suspend support)
+ *
+ * ## Comparison with mapState
+ *
+ * - `mapState(key) { transform }`: Fetches from Es collection by key, then transforms
+ * - `rememberSuspendTransformed(value) { transform }`: Transforms an object you already have
+ *
+ * Use `rememberSuspendTransformed` when you already have the object and just need to transform it.
+ * Use `mapState` when you need to fetch the object from an Es collection first.
+ *
+ * @param T the type of the input value
+ * @param R the type of the transformed result
+ * @param value the value to transform
+ * @param dependencies optional dependencies that trigger re-transformation when changed
+ * @param transform suspend function to transform the value (receives value, returns transformed result or null)
+ * @return reactive State that updates when value or dependencies change
+ */
+@Composable
+fun <T, R> rememberSuspendTransformed(
+    value: T,
+    vararg dependencies: Any?,
+    transform: suspend (T) -> R?
+): State<R?> {
+    val state = remember { mutableStateOf<R?>(null) }
+
+    LaunchedEffect(value, *dependencies) {
+        state.value = transform(value)
+    }
+
+    return state
 }
 
