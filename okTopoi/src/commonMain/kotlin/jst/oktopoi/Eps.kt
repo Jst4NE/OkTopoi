@@ -194,7 +194,12 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
     protected fun deleteFromFile(key: KeyType) {
         val fileName = Json.encodeToString(persisted.keyTypeSerializer, key)
         val filePath = Path(dirPath, fileName)
-        fileSystem.delete(filePath)
+        // Only attempt deletion if file exists - if already gone, deletion succeeded
+        if (fileSystem.exists(filePath)) {
+            fileSystem.delete(filePath)
+        } else {
+            log.d { "File already deleted: $filePath" }
+        }
     }
 
     // Persistence logic - can be overridden by subclasses

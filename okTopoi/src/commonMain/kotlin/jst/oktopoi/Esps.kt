@@ -264,6 +264,28 @@ override fun fromPersistString(string: String, fileName: String) {
 
 
     /**
+     * Hook called before fromSync processes an incoming sync item.
+     * Can be used to track sync progress or perform side effects.
+     *
+     * @param key The key being synced
+     * @param value The value being synced (null for deletions)
+     * @param timestamp The sync timestamp
+     * @param force Whether this is a forced sync
+     */
+    protected open fun onBeforeFromSync(key: KeyType, value: ValueType?, timestamp: Long, force: Boolean) {}
+
+    /**
+     * Hook called after fromSync completes processing.
+     * Can be used to track sync completion or perform side effects.
+     *
+     * @param key The key that was synced
+     * @param value The value that was synced (null for deletions)
+     * @param timestamp The sync timestamp
+     * @param synced Whether the sync was actually performed (false if rejected due to timestamp)
+     */
+    protected open fun onAfterFromSync(key: KeyType, value: ValueType?, timestamp: Long, synced: Boolean) {}
+
+    /**
      * Inserts a value received from sync and marks it as synced.
      * Only updates if the provided timestamp is greater than current sync timestamp (unless force=true).
      *
@@ -275,7 +297,9 @@ override fun fromPersistString(string: String, fileName: String) {
      */
     @OptIn(ExperimentalTime::class)
     suspend fun fromSync(key: KeyType, value: ValueType?, timestamp: Long, force: Boolean = false): Boolean {
-        return withWriteLock {
+        onBeforeFromSync(key, value, timestamp, force)
+
+        val synced = withWriteLock {
             val currentTimestamp = unsyncedKeysMap[key] ?: 0L
 
             log.d { "[${this@Esps.callingClassName}.${this@Esps.propertyName}] currentTimestamp: $currentTimestamp; incomingTimestamp: $timestamp" }
@@ -300,6 +324,9 @@ override fun fromPersistString(string: String, fileName: String) {
             }
             true
         }
+
+        onAfterFromSync(key, value, timestamp, synced)
+        return synced
     }
 
 

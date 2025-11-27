@@ -6,35 +6,30 @@ import kotlin.collections.emptySet
 
 /**
  * A Red-Black tree based implementation of MutableMap with NavigableMap operations.
- * 
+ *
  * This implementation provides:
  * - O(log n) performance for all basic operations (get, put, remove)
  * - O(1) secondary index access per criterion, O(k) for k criteria due to intersection
  * - Thread-safe access through ReadWriteLock
- * - Transparent suspend context optimization (with compiler plugin)
+ * - Suspend-first API design for seamless coroutine integration
  * - Complete NavigableMap API (firstKey, lastKey, lower/floor/ceiling/higher)
  * - Collection views with efficient iterators
- * 
- * The architecture uses a view-based pattern:
- * - UnsafeTreeMapCore: Thread-unsafe core with all algorithms
- * - SuspendTreeMapView: Internal suspend-optimized wrapper (accessed by compiler plugin)
- * - BlockingTreeMapView: Blocking access wrapper for non-suspend contexts
- * - Public API: Delegates to blocking view, transparently optimized in suspend contexts
- * 
- * ## IR Optimization and Final API
- * 
- * - The OkTopoi compiler plugin rewrites direct TreeMap API calls at IR to the appropriate view:
- *   - In suspend contexts: `treeMap.suspend.method(...)`
- *   - In non-suspend contexts: `treeMap.blocking.method(...)`
+ *
+ * ## Architecture
+ *
+ * TreeMap uses a layered approach for thread safety:
+ * - UnsafeTreeMapCore: Thread-unsafe core with all red-black tree algorithms
+ * - TreeMap: Wraps core with ReadWriteLock and provides suspend API
+ * - All public operations are suspend functions requiring coroutine context
+ *
+ * ## Extensibility via Hooks
+ *
  * - Public API methods on TreeMap are final to ensure consistent behavior and guarantee that
  *   hook methods (onBefore* / onAfter*) are always invoked through the validated execution path.
  * - Subclasses must customize behavior via the protected unsafe hooks; overriding the public
  *   API is intentionally disallowed.
  * - Unsafe overrides in TreeMap (putUnsafe/removeUnsafe/etc.) are final to preserve invariants
  *   and ensure hooks are always executed. Do not override unsafe methods in subclasses; use hooks.
- * - When the compiler plugin is not applied, the public API still functions correctly by
- *   delegating to the blocking view. For validation, each public API surface logs at debug
- *   level with tag "OkTopoi-TreeMap-Fallback" when the fallback path is executed.
  * 
  * ## Secondary Index Usage Warning
  * 
@@ -67,11 +62,10 @@ open class TreeMap<K, V> internal constructor(
 
 
     /**
-     * Internal: log when a direct TreeMap API method is executed at runtime.
-     * This indicates the compiler plugin did not redirect the call to a view.
-     * Enabled unconditionally at debug level to help validate IR transformations.
+     * Logger for TreeMap operations, primarily for error reporting
+     * (e.g., missing secondary index definitions).
      */
-    private val log = Logger.withTag("OkTopoi-TreeMap-Fallback")
+    private val log = Logger.withTag("OkTopoi-TreeMap")
     
     /**
      * Sealed class representing different types of changes to the TreeMap.

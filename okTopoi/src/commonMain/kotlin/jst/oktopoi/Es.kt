@@ -1,3 +1,5 @@
+@file:Suppress("UNCHECKED_CAST")
+
 package jst.oktopoi
 
 import androidx.compose.runtime.Composable
@@ -19,13 +21,17 @@ import jst.oktopoi.TreeMap.MapChange.Cleared
 import jst.oktopoi.TreeMap.MapChange.Put
 import jst.oktopoi.TreeMap.MapChange.Rebuild
 import jst.oktopoi.TreeMap.MapChange.Removed
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
-import kotlin.text.set
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Reactive observable collection that extends TreeMap with change notifications and UI integrations.
@@ -1184,15 +1190,30 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         // Subscribe to changes from ALL dependency Es collections
         LaunchedEffect(entryComparator, filterMap, minActiveState, dependencyTracker) {
             lifecycleOwner.lifecycle.repeatOnLifecycle(minActiveState) {
-                dependencyTracker.subscribeToAllDependencies { dependencyEs, dependencyKey ->
-                    // Find which primary entries depend on this (Es, key) pair
-                    val affectedPrimaryKeys = dependencyTracker.getPrimaryKeysDependingOn(dependencyEs, dependencyKey)
+                dependencyTracker.subscribeToAllDependencies(
+                    onDependencyChange = { dependencyEs, dependencyKey, oldValue, newValue ->
+                        // Find which primary entries depend on this (Es, key) pair
+                        // Pass old/new values to check both key and query dependencies
+                        @Suppress("UNCHECKED_CAST")
+                        val affectedPrimaryKeys = dependencyTracker.getPrimaryKeysDependingOn<Any>(
+                            dependencyEs,
+                            dependencyKey,
+                            oldValue,
+                            newValue
+                        )
 
-                    // Re-evaluate each affected primary entry
-                    affectedPrimaryKeys.forEach { primaryKey ->
+                        // Re-evaluate each affected primary entry
+                        affectedPrimaryKeys.forEach { primaryKey ->
                         reEvaluateEntry(primaryKey)
+                        }
+                    },
+                    onBatchReevaluate = { primaryKeys ->
+                        // Batch re-evaluation for Cleared/Rebuild events
+                        primaryKeys.forEach { primaryKey ->
+                            reEvaluateEntry(primaryKey)
+                        }
                     }
-                }
+                )
             }
         }
 
@@ -1483,15 +1504,30 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         // Subscribe to changes from ALL dependency Es collections
         LaunchedEffect(groupByKey, entryComparator, filterMap, minActiveState, dependencyTracker) {
             lifecycleOwner.lifecycle.repeatOnLifecycle(minActiveState) {
-                dependencyTracker.subscribeToAllDependencies { dependencyEs, dependencyKey ->
-                    // Find which primary entries depend on this (Es, key) pair
-                    val affectedPrimaryKeys = dependencyTracker.getPrimaryKeysDependingOn(dependencyEs, dependencyKey)
+                dependencyTracker.subscribeToAllDependencies(
+                    onDependencyChange = { dependencyEs, dependencyKey, oldValue, newValue ->
+                        // Find which primary entries depend on this (Es, key) pair
+                        // Pass old/new values to check both key and query dependencies
+                        @Suppress("UNCHECKED_CAST")
+                        val affectedPrimaryKeys = dependencyTracker.getPrimaryKeysDependingOn<Any>(
+                            dependencyEs,
+                            dependencyKey,
+                            oldValue,
+                            newValue
+                        )
 
-                    // Re-evaluate each affected primary entry
-                    affectedPrimaryKeys.forEach { primaryKey ->
-                        reEvaluateEntry(primaryKey)
+                        // Re-evaluate each affected primary entry
+                        affectedPrimaryKeys.forEach { primaryKey ->
+                            reEvaluateEntry(primaryKey)
+                        }
+                    },
+                    onBatchReevaluate = { primaryKeys ->
+                        // Batch re-evaluation for Cleared/Rebuild events
+                        primaryKeys.forEach { primaryKey ->
+                            reEvaluateEntry(primaryKey)
+                        }
                     }
-                }
+                )
             }
         }
 
@@ -1645,10 +1681,61 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 // ============================================================================
 
 /**
- * Context object provided to filterMap lambda, exposing fetch() for dependency tracking.
+ * Represents a dependency tracked during join operations.
+ *
+ * Dependencies can be either:
+ * - Key-based: Track changes to a specific entry (es, key)
+ * - Query-based: Track changes to entries matching secondary key criteria
+ */
+sealed interface JoinDependency {
+    val es: Es<*, *>
+
+    /**
+     * Dependency on a specific entry by primary key.
+     * Triggered when the entry with this key is added, updated, or removed.
+     */
+    data class KeyDependency(
+        override val es: Es<*, *>,
+        val key: Any
+    ) : JoinDependency
+
+    /**
+     * Dependency on a query by secondary key criteria.
+     * Triggered when ANY entry is added/updated/removed that either:
+     * - Previously matched the criteria (old value)
+     * - Now matches the criteria (new value)
+     *
+     * This catches:
+     * - Modifications to matching entries
+     * - New entries that match the criteria
+     * - Entries removed that matched the criteria
+     * - Entries changing from matching to non-matching (or vice versa)
+     */
+    data class QueryDependency(
+        override val es: Es<*, *>,
+        val criteria: List<Pair<String, Any?>>
+    ) : JoinDependency {
+
+        /**
+         * Check if a value matches this query's criteria.
+         * Uses the Es's secondary key extraction to evaluate each criterion.
+         */
+        fun <V : Any> matches(value: V): Boolean {
+            @Suppress("UNCHECKED_CAST")
+            val typedEs = es as Es<*, V>
+
+            return criteria.all { (indexName, expectedValue) ->
+                typedEs.getSecondaryKey(indexName, value) == expectedValue
+            }
+        }
+    }
+}
+
+/**
+ * Context object provided to filterMap lambda, exposing fetch() and fetchBy() for dependency tracking.
  */
 class JoinContext internal constructor() {
-    internal val dependencies = mutableSetOf<Pair<Es<*, *>, Any>>()
+    internal val dependencies = mutableSetOf<JoinDependency>()
 
     /**
      * Fetches a value from another Es collection and records the dependency.
@@ -1658,63 +1745,216 @@ class JoinContext internal constructor() {
      * @return the value if found, null otherwise
      */
     suspend fun <K : Any, V : Any> fetch(es: Es<K, V>, key: K): V? {
-        // Record dependency
-        dependencies.add(es to key)
+        // Record key-based dependency
+        dependencies.add(JoinDependency.KeyDependency(es, key))
 
         // Fetch value using suspend API (non-blocking)
         return es.get(key)
+    }
+
+    /**
+     * Fetches entries from another Es collection by secondary key criteria and records the query dependency.
+     *
+     * This enables building nested structures (e.g., Journey → Stops → Dispatches) with automatic reactivity.
+     * When ANY entry matching the criteria changes (added, updated, removed), the dependent entry re-evaluates.
+     *
+     * ## Reactivity
+     *
+     * The query dependency tracks:
+     * - **Existing entries modified**: If a matching entry's value changes
+     * - **New entries added**: If a new entry matches the criteria
+     * - **Entries removed**: If a matching entry is deleted
+     * - **Criteria match changes**: If an entry changes from matching to non-matching (or vice versa)
+     *
+     * ## Example
+     *
+     * ```kotlin
+     * val journeys = Data.journeys.asSnapshotStateListWithJoins<JourneyWithStops>(
+     *     entryComparator = compareBy { it.value.journey.startTime },
+     *     filterMap = remember(filters...) {
+     *         { journeyEntry, context ->
+     *             val journey = journeyEntry.value
+     *
+     *             // Fetch all dispatches for this journey with automatic dependency tracking
+     *             val dispatches = context.fetchBy(
+     *                 Data.dispatches,
+     *                 DispatchDto::journeyId.name to journey.id
+     *             )
+     *
+     *             // Group by stop (warehouse)
+     *             val stops = dispatches.groupBy { it.value.warehouseId }
+     *
+     *             JourneyWithStops(journey, stops)
+     *         }
+     *     }
+     * )
+     *
+     * // When dispatch #456 is added/updated/removed:
+     * // → Only journeys that have a query dependency on "journeyId == X" re-evaluate
+     * // → If dispatch #456 belongs to journey #123, only journey #123 re-evaluates
+     * ```
+     *
+     * ## Performance
+     *
+     * - Initial fetch: O(log n) per criterion (uses secondary index)
+     * - On change: O(q) where q = number of query dependencies that might match (typically small)
+     * - Matching check: O(c) where c = number of criteria (typically 1-3)
+     *
+     * @param es the Es collection to fetch from
+     * @param criteria secondary key criteria as "indexName" to value pairs
+     * @return list of matching entries (may be empty)
+     */
+    suspend fun <K : Any, V : Any> fetchBy(
+        es: Es<K, V>,
+        vararg criteria: Pair<String, Any?>
+    ): List<Map.Entry<K, V>> {
+        // Record query-based dependency
+        dependencies.add(JoinDependency.QueryDependency(es, criteria.toList()))
+
+        // Fetch matching entries using secondary index (efficient O(log n) per criterion)
+        // getBy returns Collection<V>, we need to convert to List<Map.Entry<K, V>>
+        val entries = mutableListOf<Map.Entry<K, V>>()
+        es.forEachBy(*criteria) { key, value ->
+            entries.add(MapEntry(key, value))
+        }
+        return entries
     }
 }
 
 /**
  * Tracks dependencies between primary entries and their fetched data.
  *
- * Maps: primaryKey → Set<(Es, dependencyKey)>
- * Reverse index: (Es, dependencyKey) → Set<primaryKey>
+ * Supports both key-based and query-based dependencies:
+ * - Key dependencies: Track specific (Es, key) pairs
+ * - Query dependencies: Track entries matching secondary key criteria
+ *
+ * Maps: primaryKey → Set<JoinDependency>
+ * Reverse indices:
+ * - keyToPrimaries: (Es, key) → Set<primaryKey>  (for key dependencies)
+ * - queryDeps: List<(primaryKey, QueryDependency)>  (for query dependencies)
+ *
+ * **Thread Safety**: This class uses Mutex for proper synchronization, making it safe
+ * to use from any dispatcher (Dispatchers.Main, Default, IO, etc.). All public methods
+ * are suspend functions to enable non-blocking synchronization.
  */
 private class JoinDependencyTracker<PK : Any> {
+    private val mutex = Mutex()
+
     // Forward: which dependencies does each primary entry have?
-    private val primaryToDependencies = mutableMapOf<PK, MutableSet<Pair<Es<*, *>, Any>>>()
+    private val primaryToDependencies = mutableMapOf<PK, MutableSet<JoinDependency>>()
 
-    // Reverse: which primary entries depend on each (Es, key) pair?
-    private val dependencyToPrimaries = mutableMapOf<Pair<Es<*, *>, Any>, MutableSet<PK>>()
+    // Reverse index for key dependencies: (Es, key) → Set<primaryKey>
+    private val keyToPrimaries = mutableMapOf<Pair<Es<*, *>, Any>, MutableSet<PK>>()
 
-    fun recordDependencies(primaryKey: PK, dependencies: Set<Pair<Es<*, *>, Any>>) {
-        // Remove old dependencies for this primary key
-        primaryToDependencies[primaryKey]?.forEach { oldDep ->
-            dependencyToPrimaries[oldDep]?.remove(primaryKey)
-            if (dependencyToPrimaries[oldDep]?.isEmpty() == true) {
-                dependencyToPrimaries.remove(oldDep)
+    // List of all query dependencies: (primaryKey, QueryDependency)
+    // Stored as list for efficient iteration during change matching
+    private val queryDeps = mutableListOf<Pair<PK, JoinDependency.QueryDependency>>()
+
+    suspend fun recordDependencies(primaryKey: PK, dependencies: Set<JoinDependency>) {
+        mutex.withLock {
+            // Remove old dependencies for this primary key
+            primaryToDependencies[primaryKey]?.forEach { oldDep ->
+                when (oldDep) {
+                    is JoinDependency.KeyDependency -> {
+                        // Remove from key-based reverse index
+                        keyToPrimaries[oldDep.es to oldDep.key]?.remove(primaryKey)
+                        if (keyToPrimaries[oldDep.es to oldDep.key]?.isEmpty() == true) {
+                            keyToPrimaries.remove(oldDep.es to oldDep.key)
+                        }
+                    }
+                    is JoinDependency.QueryDependency -> {
+                        // Remove from query dependencies list
+                        queryDeps.removeAll { it.first == primaryKey && it.second == oldDep }
+                    }
+                }
+            }
+
+            // Record new dependencies
+            primaryToDependencies[primaryKey] = dependencies.toMutableSet()
+            dependencies.forEach { dep ->
+                when (dep) {
+                    is JoinDependency.KeyDependency -> {
+                        // Add to key-based reverse index
+                        keyToPrimaries.getOrPut(dep.es to dep.key) { mutableSetOf() }.add(primaryKey)
+                    }
+                    is JoinDependency.QueryDependency -> {
+                        // Add to query dependencies list
+                        queryDeps.add(primaryKey to dep)
+                    }
+                }
             }
         }
-
-        // Record new dependencies
-        primaryToDependencies[primaryKey] = dependencies.toMutableSet()
-        dependencies.forEach { dep ->
-            dependencyToPrimaries.getOrPut(dep) { mutableSetOf() }.add(primaryKey)
-        }
     }
 
-    fun getPrimaryKeysDependingOn(es: Es<*, *>, key: Any): Set<PK> {
-        return dependencyToPrimaries[es to key]?.toSet() ?: emptySet()
-    }
+    /**
+     * Get all primary keys that depend on a specific (Es, key) pair via key dependencies,
+     * PLUS primary keys that depend on it via query dependencies (if old/new values provided).
+     *
+     * @param es the Es collection that changed
+     * @param key the key that changed
+     * @param oldValue optional old value (for query dependency matching)
+     * @param newValue optional new value (for query dependency matching)
+     * @return set of all affected primary keys
+     */
+    suspend fun <V : Any> getPrimaryKeysDependingOn(
+        es: Es<*, *>,
+        key: Any,
+        oldValue: V? = null,
+        newValue: V? = null
+    ): Set<PK> {
+        return mutex.withLock {
+            val result = mutableSetOf<PK>()
 
-    fun removePrimaryEntry(primaryKey: PK) {
-        // Remove from reverse index
-        primaryToDependencies[primaryKey]?.forEach { dep ->
-            dependencyToPrimaries[dep]?.remove(primaryKey)
-            if (dependencyToPrimaries[dep]?.isEmpty() == true) {
-                dependencyToPrimaries.remove(dep)
+            // Add primary keys from key-based dependencies
+            keyToPrimaries[es to key]?.let { result.addAll(it) }
+
+            // Also check query dependencies if values provided
+            if (oldValue != null || newValue != null) {
+                queryDeps
+                    .filter { (_, queryDep) -> queryDep.es == es }
+                    .forEach { (primaryKey, queryDep) ->
+                        // Check if old or new value matches the query
+                        val oldMatches = oldValue?.let { queryDep.matches(it) } ?: false
+                        val newMatches = newValue?.let { queryDep.matches(it) } ?: false
+
+                        if (oldMatches || newMatches) {
+                            result.add(primaryKey)
+                        }
+                    }
             }
-        }
 
-        // Remove from forward index
-        primaryToDependencies.remove(primaryKey)
+            result.toSet()
+        }
     }
 
-    fun clear() {
-        primaryToDependencies.clear()
-        dependencyToPrimaries.clear()
+    suspend fun removePrimaryEntry(primaryKey: PK) {
+        mutex.withLock {
+            // Remove from reverse indices
+            primaryToDependencies[primaryKey]?.forEach { dep ->
+                when (dep) {
+                    is JoinDependency.KeyDependency -> {
+                        keyToPrimaries[dep.es to dep.key]?.remove(primaryKey)
+                        if (keyToPrimaries[dep.es to dep.key]?.isEmpty() == true) {
+                            keyToPrimaries.remove(dep.es to dep.key)
+                        }
+                    }
+                    is JoinDependency.QueryDependency -> {
+                        queryDeps.removeAll { it.first == primaryKey && it.second == dep }
+                    }
+                }
+            }
+
+            // Remove from forward index
+            primaryToDependencies.remove(primaryKey)
+        }
+    }
+
+    suspend fun clear() {
+        mutex.withLock {
+            primaryToDependencies.clear()
+            keyToPrimaries.clear()
+            queryDeps.clear()
+        }
     }
 
     /**
@@ -1723,19 +1963,37 @@ private class JoinDependencyTracker<PK : Any> {
      *
      * Dynamically discovers and subscribes to Es instances as dependencies are recorded,
      * fixing the issue where initial capture would happen before rebuild() populates dependencies.
+     *
+     * Handles both key-based and query-based dependencies:
+     * - Key dependencies: Direct (es, key) lookups via onDependencyChange
+     * - Query dependencies:
+     *   - Put/Removed: Checked via onDependencyChange with old/new values
+     *   - Cleared/Rebuild: Batch re-evaluation via onBatchReevaluate
+     *
+     * @param onDependencyChange Called when a specific dependency (es, key) changes.
+     *                           Receives old/new values for query dependency matching.
+     *                           The caller should use getPrimaryKeysDependingOn with these values.
+     * @param onBatchReevaluate Called when a set of primary keys need re-evaluation
+     *                          (e.g., Cleared/Rebuild events with query dependencies).
+     *                          Receives primary keys directly to avoid expensive lookups.
      */
     suspend fun subscribeToAllDependencies(
-        onChange: suspend (es: Es<*, *>, key: Any) -> Unit
+        onDependencyChange: suspend (es: Es<*, *>, key: Any, oldValue: Any?, newValue: Any?) -> Unit,
+        onBatchReevaluate: suspend (primaryKeys: Set<PK>) -> Unit
     ) {
         // Track which Es instances we've already subscribed to
         val subscribedEs = mutableSetOf<Es<*, *>>()
 
-        kotlinx.coroutines.coroutineScope {
+        coroutineScope {
             // Continuously check for new Es instances to subscribe to
             launch {
                 while (true) {
                     // Find Es instances that have dependencies but aren't yet subscribed
-                    val currentEsInstances = dependencyToPrimaries.keys.map { it.first }.toSet()
+                    val currentEsInstances = mutex.withLock {
+                        val fromKeyDeps = keyToPrimaries.keys.map { it.first }.toSet()
+                        val fromQueryDeps = queryDeps.map { it.second.es }.toSet()
+                        fromKeyDeps + fromQueryDeps
+                    }
                     val newEsInstances = currentEsInstances - subscribedEs
 
                     // Launch subscription coroutine for each newly discovered Es
@@ -1744,28 +2002,60 @@ private class JoinDependencyTracker<PK : Any> {
                         launch {
                             es.changes.collect { change ->
                                 when (change) {
-                                    is TreeMap.MapChange.Put -> {
-                                        onChange(es, change.key)
+                                    is Put -> {
+                                        // Individual change - use onDependencyChange with values
+                                        // This handles both key and query dependencies
+                                        onDependencyChange(es, change.key, change.oldValue, change.value)
                                     }
-                                    is TreeMap.MapChange.Removed -> {
-                                        onChange(es, change.key)
+                                    is Removed -> {
+                                        // Individual change - use onDependencyChange with old value
+                                        onDependencyChange(es, change.key, change.oldValue, null)
                                     }
-                                    is TreeMap.MapChange.Cleared -> {
-                                        // All dependencies from this Es are affected
-                                        // Re-evaluate all primary entries that depend on any key from this Es
-                                        dependencyToPrimaries.keys
-                                            .filter { it.first == es }
-                                            .forEach { (_, depKey) ->
-                                                onChange(es, depKey)
-                                            }
+                                    is Cleared -> {
+                                        // ✅ Handle key dependencies via onDependencyChange
+                                        val keyDependentPrimaries = mutex.withLock {
+                                            keyToPrimaries.keys
+                                                .filter { it.first == es }
+                                                .flatMap { (es, key) -> keyToPrimaries[es to key] ?: emptySet() }
+                                                .toSet()
+                                        }
+
+                                        // ✅ Handle query dependencies via onBatchReevaluate
+                                        val queryDependentPrimaries = mutex.withLock {
+                                            queryDeps
+                                                .filter { it.second.es == es }
+                                                .map { it.first }
+                                                .toSet()
+                                        }
+
+                                        // Batch re-evaluate all affected primaries (both key and query)
+                                        val allAffected = keyDependentPrimaries + queryDependentPrimaries
+                                        if (allAffected.isNotEmpty()) {
+                                            onBatchReevaluate(allAffected)
+                                        }
                                     }
-                                    is TreeMap.MapChange.Rebuild -> {
-                                        // Similar to Cleared - all dependencies affected
-                                        dependencyToPrimaries.keys
-                                            .filter { it.first == es }
-                                            .forEach { (_, depKey) ->
-                                                onChange(es, depKey)
-                                            }
+                                    is Rebuild -> {
+                                        // ✅ Handle key dependencies
+                                        val keyDependentPrimaries = mutex.withLock {
+                                            keyToPrimaries.keys
+                                                .filter { it.first == es }
+                                                .flatMap { (es, key) -> keyToPrimaries[es to key] ?: emptySet() }
+                                                .toSet()
+                                        }
+
+                                        // ✅ Handle query dependencies
+                                        val queryDependentPrimaries = mutex.withLock {
+                                            queryDeps
+                                                .filter { it.second.es == es }
+                                                .map { it.first }
+                                                .toSet()
+                                        }
+
+                                        // Batch re-evaluate all affected primaries (both key and query)
+                                        val allAffected = keyDependentPrimaries + queryDependentPrimaries
+                                        if (allAffected.isNotEmpty()) {
+                                            onBatchReevaluate(allAffected)
+                                        }
                                     }
                                 }
                             }
@@ -1774,12 +2064,12 @@ private class JoinDependencyTracker<PK : Any> {
 
                     // Check for new dependencies periodically
                     // Short delay since this is only active during rebuild/updates
-                    kotlinx.coroutines.delay(50)
+                    delay(50)
                 }
             }
 
             // Suspend indefinitely - keep subscriptions alive until cancelled
-            kotlinx.coroutines.awaitCancellation()
+            awaitCancellation()
         }
     }
 }
