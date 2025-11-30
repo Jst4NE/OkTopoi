@@ -19,7 +19,9 @@ class OktopoiIrGenerationExtension(
             // Only apply OktopoiTransformer for E/Es metadata injection
             // TreeMapSuspendTransformer removed - TreeMap methods are now natively suspend
             // RunBlockingMultiplatformInliner removed - no more runBlocking calls
-            moduleFragment.transform(OktopoiTransformer(pluginContext, messageCollector), null)
+            moduleFragment
+                .transform(OktopoiTransformer(pluginContext, messageCollector), null)
+                .transform(RunBlockingMultiplatformInliner(pluginContext), null)
         } catch (e: Exception) {
             messageCollector.report(CompilerMessageSeverity.ERROR, "[OktopoiPlugin] Transformation error: ${e.message}")
             throw e
