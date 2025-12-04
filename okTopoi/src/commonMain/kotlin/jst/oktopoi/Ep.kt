@@ -13,7 +13,6 @@ import kotlinx.io.files.Path
 import kotlinx.io.readString
 import kotlinx.io.writeString
 import kotlinx.serialization.KSerializer
-import kotlinx.serialization.json.Json
 import kotlin.time.ExperimentalTime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -144,7 +143,22 @@ open class Ep<ValueType : Any?> : E<ValueType> {
 
                 // Load existing value from file if it exists and is not empty
                 readFromFile()?.let { content ->
-                    super.value = decodeValue(content) as ValueType
+                    try {
+                        super.value = decodeValue(content) as ValueType
+                    } catch (e: Exception) {
+                        // Archive corrupted file and log error, but don't crash
+                        Logger.e("OkTopoi-Ep", e) {
+                            "Failed to deserialize ${callingClassName}.${propertyName}: ${e.message}\n" +
+                            "Using default value instead. Corrupted file archived."
+                        }
+                        archiveCorruptedFile(
+                            filePath = this@Ep.filePath,
+                            fileSystem = this@Ep.fileSystem,
+                            rootDir = rootDir,
+                            propertyIdentifier = "${callingClassName}.${propertyName}"
+                        )
+                        // super.value remains at default (from parent E constructor)
+                    }
                 }
 
             } catch (e: Exception) {
@@ -283,7 +297,7 @@ open class Ep<ValueType : Any?> : E<ValueType> {
      * Override this method to customize serialization (e.g., add sync metadata).
      */
     protected open fun encodeValue(value: ValueType?): String {
-        return Json.encodeToString(persisted.valueSerializer, value)
+        return oktopoiJson.encodeToString(persisted.valueSerializer, value)
     }
 
     /**
@@ -291,7 +305,7 @@ open class Ep<ValueType : Any?> : E<ValueType> {
      * Override this method to customize deserialization (e.g., extract sync metadata).
      */
     protected open fun decodeValue(content: String): ValueType? {
-        return Json.decodeFromString(persisted.valueSerializer, content)
+        return oktopoiJson.decodeFromString(persisted.valueSerializer, content)
     }
 
     /**

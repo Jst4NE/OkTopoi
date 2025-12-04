@@ -12,15 +12,92 @@ import kotlinx.io.files.FileSystem
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
 import kotlinx.serialization.InternalSerializationApi
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.serializer
 
 private val log = Logger.withTag("Oktopoi")
+
+/**
+ * Configured Json instance optimized for OkTopoi persistence.
+ *
+ * Configuration rationale:
+ * - encodeDefaults = false: Allows code defaults to evolve - users automatically benefit from improved defaults
+ * - explicitNulls = true: Preserves explicit null values when they differ from non-null defaults
+ * - ignoreUnknownKeys = true: Forward compatibility - enables field removal without breaking old persistence files
+ * - coerceInputValues = true: Graceful schema evolution - handles nullability changes and enum refactoring
+ * - allowSpecialFloatingPointValues = true: Prevents crashes on NaN/Infinity in calculations
+ */
+internal val oktopoiJson = Json {
+    encodeDefaults = false
+    explicitNulls = true
+    ignoreUnknownKeys = true
+    coerceInputValues = true
+    allowSpecialFloatingPointValues = true
+}
 
 /**
  * Exception thrown when persistence operations fail.
  * Indicates that data could not be written to disk, ensuring fail-fast behavior for data integrity.
  */
 class PersistenceFailedException(message: String, cause: Throwable) : RuntimeException(message, cause)
+
+/**
+ * Archives a corrupted persistence file for later investigation.
+ *
+ * Moves the file to a centralized ".oktopoi-errors" directory at the root level with a timestamped name to:
+ * - Prevent app crashes from corrupted data
+ * - Preserve evidence for debugging
+ * - Allow manual recovery if needed
+ * - Provide a single location for all corruption issues
+ *
+ * @param filePath Path to the corrupted file
+ * @param fileSystem FileSystem to use for operations
+ * @param rootDir Root directory of OkTopoi persistence (for error folder placement)
+ * @param propertyIdentifier Identifier for the property (e.g., "ClassName.propertyName")
+ * @return true if successfully archived, false if archival failed
+ */
+@OptIn(kotlin.time.ExperimentalTime::class)
+internal fun archiveCorruptedFile(
+    filePath: Path,
+    fileSystem: FileSystem,
+    rootDir: Path,
+    propertyIdentifier: String
+): Boolean {
+    return try {
+        // Centralized error folder at root level with restricted name
+        val errorDir = Path(rootDir, ".oktopoi-errors")
+        fileSystem.createDirectories(errorDir)
+
+        val timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds()
+        val originalFileName = filePath.name
+        // Format: PropertyIdentifier_timestamp_originalFileName
+        val archivedFileName = "${propertyIdentifier}_${timestamp}_$originalFileName"
+        val archivedPath = Path(errorDir, archivedFileName)
+
+        // Move the corrupted file to error archive
+        fileSystem.atomicMove(filePath, archivedPath)
+
+        Logger.w("OkTopoi-ErrorArchive") {
+            "Archived corrupted file to .oktopoi-errors/: $originalFileName → $archivedFileName"
+        }
+        true
+    } catch (e: Exception) {
+        Logger.e("OkTopoi-ErrorArchive", e) {
+            "Failed to archive corrupted file: ${filePath.name}"
+        }
+        // Try to delete the corrupted file as fallback
+        try {
+            fileSystem.delete(filePath)
+            Logger.w("OkTopoi-ErrorArchive") { "Deleted corrupted file: ${filePath.name}" }
+            true
+        } catch (deleteError: Exception) {
+            Logger.e("OkTopoi-ErrorArchive", deleteError) {
+                "Failed to delete corrupted file: ${filePath.name}"
+            }
+            false
+        }
+    }
+}
 
 internal val persistCoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher)
 internal val initDefaultIO = MutableStateFlow<Pair<Path, FileSystem>?>(null)

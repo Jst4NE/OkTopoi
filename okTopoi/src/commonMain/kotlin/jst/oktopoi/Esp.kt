@@ -24,7 +24,6 @@ import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
 
@@ -229,14 +228,14 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
             value = value,
             syncTimestamp = synchronized(lock) { syncTimestamp }
         )
-        return Json.encodeToString(
+        return oktopoiJson.encodeToString(
             PersistedValueWithSyncEsp.serializer(valueSerializer),
             wrappedValue
         )
     }
 
     override fun decodeValue(content: String): ValueType? {
-        val wrappedValue = Json.decodeFromString(
+        val wrappedValue = oktopoiJson.decodeFromString(
             PersistedValueWithSyncEsp.serializer(valueSerializer),
             content
         )

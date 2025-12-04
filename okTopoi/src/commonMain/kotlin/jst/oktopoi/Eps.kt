@@ -9,7 +9,6 @@ import kotlinx.io.files.Path
 import kotlinx.io.readString
 import kotlinx.io.writeString
 import kotlinx.serialization.KSerializer
-import kotlinx.serialization.json.Json
 import kotlin.time.ExperimentalTime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -164,11 +163,26 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
                 this@Eps.persistenceLoadDepth++
                 try {
                     existingFiles.forEach { file ->
-                        fileSystem.source(file)
-                            .buffered()
-                            .use { source ->
-                                fromPersistString(source.readString(), file.name)
+                        try {
+                            fileSystem.source(file)
+                                .buffered()
+                                .use { source ->
+                                    fromPersistString(source.readString(), file.name)
+                                }
+                        } catch (e: Exception) {
+                            // Archive corrupted file and continue loading other entries
+                            Logger.e("OkTopoi-Eps", e) {
+                                "Failed to deserialize entry from ${file.name} in ${callingClassName}.${propertyName}: ${e.message}\n" +
+                                "Skipping this entry. Corrupted file archived."
                             }
+                            archiveCorruptedFile(
+                                filePath = file,
+                                fileSystem = this@Eps.fileSystem,
+                                rootDir = rootDir,
+                                propertyIdentifier = "${callingClassName}.${propertyName}"
+                            )
+                            // Continue with next file
+                        }
                     }
                 } finally {
                     this@Eps.persistenceLoadDepth--
@@ -186,13 +200,13 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
 
     // File I/O helper methods
     protected fun writeToFile(key: KeyType, content: String) {
-        val fileName = Json.encodeToString(persisted.keyTypeSerializer, key)
+        val fileName = oktopoiJson.encodeToString(persisted.keyTypeSerializer, key)
         val filePath = Path(dirPath, fileName)
         fileSystem.sink(filePath).buffered().use { it.writeString(content) }
     }
 
     protected fun deleteFromFile(key: KeyType) {
-        val fileName = Json.encodeToString(persisted.keyTypeSerializer, key)
+        val fileName = oktopoiJson.encodeToString(persisted.keyTypeSerializer, key)
         val filePath = Path(dirPath, fileName)
         // Only attempt deletion if file exists - if already gone, deletion succeeded
         if (fileSystem.exists(filePath)) {
@@ -205,7 +219,7 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
     // Persistence logic - can be overridden by subclasses
     protected open fun persistEntry(key: KeyType, value: ValueType?) {
         if (value != null) {
-            writeToFile(key, Json.encodeToString(persisted.valueTypeSerializer, value))
+            writeToFile(key, oktopoiJson.encodeToString(persisted.valueTypeSerializer, value))
         } else {
             deleteFromFile(key)
         }
@@ -250,11 +264,11 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
     // through the unsafe hooks being called by their underlying put/remove operations
 
     open fun fromPersistString(string: String, fileName: String) {
-        val value = Json.decodeFromString(
+        val value = oktopoiJson.decodeFromString(
             persisted.valueTypeSerializer,
             string
         )
-        val key = Json.decodeFromString(
+        val key = oktopoiJson.decodeFromString(
             persisted.keyTypeSerializer,
             fileName
         )

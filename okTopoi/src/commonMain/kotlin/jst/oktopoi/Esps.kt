@@ -19,7 +19,6 @@ import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
 import co.touchlab.kermit.Logger
@@ -240,9 +239,9 @@ override fun setup() {
 
 
 override fun fromPersistString(string: String, fileName: String) {
-        val combined = Json.decodeFromString(PersistedValueWithSync.serializer(persisted.valueTypeSerializer), string)
+        val combined = oktopoiJson.decodeFromString(PersistedValueWithSync.serializer(persisted.valueTypeSerializer), string)
         // Extract key from filename (always contains serialized key)
-        val key = Json.decodeFromString(persisted.keyTypeSerializer, fileName)
+        val key = oktopoiJson.decodeFromString(persisted.keyTypeSerializer, fileName)
 
         // Notify subclasses about the loaded entry (no extra I/O)
         onPersistedEntryLoaded(key, combined.value, combined.syncTimestamp)
@@ -511,7 +510,7 @@ override fun fromPersistString(string: String, fileName: String) {
         
         if (value != null) {
             // Write with sync metadata
-            val content = Json.encodeToString(
+            val content = oktopoiJson.encodeToString(
                 PersistedValueWithSync.serializer(persisted.valueTypeSerializer),
                 PersistedValueWithSync(value, syncTimestamp)
             )
@@ -520,7 +519,7 @@ override fun fromPersistString(string: String, fileName: String) {
             // Delete case
             if (syncTimestamp < 0) {
                 // Deletion tombstone - write null + negative timestamp instead of deleting
-                val content = Json.encodeToString(
+                val content = oktopoiJson.encodeToString(
                     PersistedValueWithSync.serializer(persisted.valueTypeSerializer),
                     PersistedValueWithSync(null, syncTimestamp)
                 )
