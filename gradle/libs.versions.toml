@@ -1,19 +1,19 @@
 [versions]
 
 atomicfu = "0.29.0"
-kotlin = "2.2.20"
+kotlin = "2.3.0"
 kotlinxCoroutinesCore = "1.10.2"
-kotlinxIoCore = "0.8.0"
+kotlinxIoCore = "0.8.2"
 kotlinxSerializationJson = "1.9.0"
 
 kermit = "2.0.8"
 
-compose-multiplatform = "1.9.1"
+compose-multiplatform = "1.9.3"
 
-agp = "8.13.0"
+agp = "8.13.2"
 android-minSdk = "24"
 android-compileSdk = "36"
-lifecycleRuntimeCompose = "2.9.5"
+lifecycleRuntimeCompose = "2.9.6"
 
 
 
@@ -33,10 +33,11 @@ lifecycle-runtime-compose = { module = "org.jetbrains.androidx.lifecycle:lifecyc
 
 [plugins]
 
-androidLibrary = { id = "com.android.library", version.ref = "agp" }
+android-kotlin-multiplatform-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlinJvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlin-serialize = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
-vanniktech-mavenPublish = { id = "com.vanniktech.maven.publish", version = "0.34.0" }
+vanniktech-mavenPublish = { id = "com.vanniktech.maven.publish", version = "0.35.0" }
 
 composeMultiplatform = { id = "org.jetbrains.compose", version.ref = "compose-multiplatform" }
 composeCompiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

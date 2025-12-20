@@ -10,6 +10,7 @@ import org.jetbrains.kotlin.config.CommonConfigurationKeys
 
 @OptIn(ExperimentalCompilerApi::class)
 class OktopoiCompilerPluginRegistrar : CompilerPluginRegistrar() {
+    override val pluginId: String = "jst.oktopoi.compiler-plugin"
     override val supportsK2: Boolean = true
     
     override fun ExtensionStorage.registerExtensions(configuration: CompilerConfiguration) {
