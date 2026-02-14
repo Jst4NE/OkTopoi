@@ -55,10 +55,12 @@ object OkTopoiConstants {
      * ```
      *
      * Adjust this value based on your sync requirements:
+     * - Duration.ZERO: Immediate sync on every change (no periodic timer)
      * - Lower values: More frequent sync, higher network/CPU usage
      * - Higher values: Less frequent sync, potential for data staleness
+     * - Duration.INFINITE: Automatic outward sync disabled entirely
      */
-    val DEFAULT_SYNC_INTERVAL: Duration = 90.seconds
+    val DEFAULT_SYNC_INTERVAL: Duration = Duration.ZERO
     
     /**
      * Maximum number of yield() attempts in ReadWriteLock before suspending.

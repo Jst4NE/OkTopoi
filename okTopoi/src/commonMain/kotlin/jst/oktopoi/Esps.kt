@@ -25,6 +25,7 @@ import co.touchlab.kermit.Logger
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
+import kotlin.time.Duration
 
 /**
  * Internal wrapper for persisted values that includes synchronization timestamp.
@@ -136,8 +137,8 @@ open class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
     private val unsyncedKeysMap: MutableMap<KeyType, Long> = mutableMapOf() // Keys that need syncing (timestamp)
     private val syncTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1) // Triggers sync flow
 
-    // Sync operation flag - protected by rwLock, no separate synchronization needed
-    private var automaticOutwardSync: Boolean = false
+    // Sync interval: ZERO = immediate, INFINITE = disabled, >0 = periodic fallback
+    private var syncInterval: Duration = OkTopoiConstants.DEFAULT_SYNC_INTERVAL
 
     // Sync parameters - will be initialized in constructor
     private val incomingSync: Flow<Triple<KeyType, ValueType?, Long>>
@@ -171,14 +172,14 @@ open class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
         secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
         incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
         outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit,
-        automaticOutwardSync: Boolean = true,
+        syncInterval: Duration = OkTopoiConstants.DEFAULT_SYNC_INTERVAL,
         syncActive: Flow<Boolean> = MutableStateFlow(true),
         syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher),
         foreignKeys: ForeignKeyBuilder<KeyType, ValueType>.() -> Unit = {}
     ) : super(persisted, sortingBy, secondaryKeys) {
         this.incomingSync = incomingSync
         this.outgoingSync = outgoingSync
-        this.automaticOutwardSync = automaticOutwardSync
+        this.syncInterval = syncInterval
         this.syncActive = syncActive
         this.syncScope = syncScope
         this.foreignKeyDependencies = ForeignKeyBuilder<KeyType, ValueType>().apply(foreignKeys).build()
@@ -206,12 +207,19 @@ override fun setup() {
         }
 
         // Set up outbound sync: start with existing unsynced, then observe changes
+        // syncInterval: INFINITE = disabled, ZERO = immediate (trigger-only), >0 = trigger + periodic fallback
+        if (syncInterval == Duration.INFINITE) return
         outboundJob = syncScope.launch {
             syncActive
                 .flatMapLatest { active ->
                     if (active) {
-                        kotlinx.coroutines.flow
-                            .merge(syncTrigger, flow { while (true) { delay(OkTopoiConstants.DEFAULT_SYNC_INTERVAL); emit(Unit) } })
+                        val triggerFlow = if (syncInterval > Duration.ZERO) {
+                            kotlinx.coroutines.flow
+                                .merge(syncTrigger, flow { while (true) { delay(syncInterval); emit(Unit) } })
+                        } else {
+                            syncTrigger
+                        }
+                        triggerFlow
                             .mapLatest { entriesToSync() }
                             .onStart { emit(entriesToSync()) }
                     } else {
@@ -536,25 +544,28 @@ override fun fromPersistString(string: String, fileName: String) {
     // ========================================================================
     
     override fun onBeforePutUnsafe(key: KeyType, newValue: ValueType) {
-        if (automaticOutwardSync && inboundSuppressionDepth == 0 && persistenceLoadDepth == 0) {
+        if (syncInterval != Duration.INFINITE && inboundSuppressionDepth == 0 && persistenceLoadDepth == 0) {
             unsyncedKeysMap[key] = Clock.System.now().toEpochMilliseconds()
+            if (syncInterval == Duration.ZERO) syncTrigger.tryEmit(Unit)
         }
         super.onBeforePutUnsafe(key, newValue)
     }
-    
+
     override fun onBeforeRemoveUnsafe(key: KeyType) {
-        if (automaticOutwardSync && inboundSuppressionDepth == 0 && persistenceLoadDepth == 0) {
+        if (syncInterval != Duration.INFINITE && inboundSuppressionDepth == 0 && persistenceLoadDepth == 0) {
             unsyncedKeysMap[key] = -Clock.System.now().toEpochMilliseconds()
+            if (syncInterval == Duration.ZERO) syncTrigger.tryEmit(Unit)
         }
         super.onBeforeRemoveUnsafe(key)
     }
-    
+
     override fun onBeforeClearUnsafe() {
-        if (automaticOutwardSync) {
+        if (syncInterval != Duration.INFINITE) {
             // Mark all existing entries as deleted before clearing
             keysUnsafe().forEach { key ->
                 unsyncedKeysMap[key] = -Clock.System.now().toEpochMilliseconds()
             }
+            if (syncInterval == Duration.ZERO) syncTrigger.tryEmit(Unit)
         }
         super.onBeforeClearUnsafe()
     }

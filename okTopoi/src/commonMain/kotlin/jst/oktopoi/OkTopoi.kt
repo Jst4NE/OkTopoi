@@ -14,6 +14,7 @@ import kotlinx.io.files.SystemFileSystem
 import kotlinx.serialization.InternalSerializationApi
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.serializer
+import kotlin.time.Duration
 
 private val log = Logger.withTag("Oktopoi")
 
@@ -575,7 +576,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> esps
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
     incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
     noinline outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit,
-    automaticOutwardSync: Boolean = true,
+    syncInterval: Duration = OkTopoiConstants.DEFAULT_SYNC_INTERVAL,
     syncActive: Flow<Boolean> = MutableStateFlow(true),
     syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher)
 ): Esps<KeyType, ValueType> {
@@ -590,7 +591,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> esps
         secondaryKeys = secondaryKeys,
         incomingSync = incomingSync,
         outgoingSync = outgoingSync,
-        automaticOutwardSync = automaticOutwardSync,
+        syncInterval = syncInterval,
         syncActive = syncActive,
         syncScope = syncScope
     )
@@ -605,7 +606,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> esps(
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
     incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
     noinline outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit,
-    automaticOutwardSync: Boolean = true,
+    syncInterval: Duration = OkTopoiConstants.DEFAULT_SYNC_INTERVAL,
     syncActive: Flow<Boolean> = MutableStateFlow(true),
     syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher)
 ): Esps<KeyType, ValueType> {
@@ -620,7 +621,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> esps(
         secondaryKeys = secondaryKeys,
         incomingSync = incomingSync,
         outgoingSync = outgoingSync,
-        automaticOutwardSync = automaticOutwardSync,
+        syncInterval = syncInterval,
         syncActive = syncActive,
         syncScope = syncScope
     )
@@ -634,7 +635,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> Coro
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
     incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
     noinline outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit,
-    automaticOutwardSync: Boolean = true,
+    syncInterval: Duration = OkTopoiConstants.DEFAULT_SYNC_INTERVAL,
     syncActive: Flow<Boolean> = MutableStateFlow(true)
 ): Esps<KeyType, ValueType> {
     return Esps(
@@ -648,7 +649,7 @@ inline fun <reified KeyType : Comparable<KeyType>, reified ValueType : Any> Coro
         secondaryKeys = secondaryKeys,
         incomingSync = incomingSync,
         outgoingSync = outgoingSync,
-        automaticOutwardSync = automaticOutwardSync,
+        syncInterval = syncInterval,
         syncActive = syncActive,
         syncScope = this
     )
@@ -663,7 +664,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> CoroutineScope.esps(
     noinline secondaryKeys: SecondaryIndexBuilder<KeyType, ValueType>.() -> Unit = {},
     incomingSync: Flow<Triple<KeyType, ValueType?, Long>>,
     noinline outgoingSync: suspend (KeyType, ValueType?, Long) -> Unit,
-    automaticOutwardSync: Boolean = true,
+    syncInterval: Duration = OkTopoiConstants.DEFAULT_SYNC_INTERVAL,
     syncActive: Flow<Boolean> = MutableStateFlow(true)
 ): Esps<KeyType, ValueType> {
     return Esps(
@@ -677,7 +678,7 @@ inline fun <reified KeyType : Any, reified ValueType : Any> CoroutineScope.esps(
         secondaryKeys = secondaryKeys,
         incomingSync = incomingSync,
         outgoingSync = outgoingSync,
-        automaticOutwardSync = automaticOutwardSync,
+        syncInterval = syncInterval,
         syncActive = syncActive,
         syncScope = this
     )
