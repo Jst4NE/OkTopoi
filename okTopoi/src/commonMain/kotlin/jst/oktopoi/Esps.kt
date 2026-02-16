@@ -15,7 +15,6 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
@@ -219,27 +218,30 @@ override fun setup() {
                         } else {
                             syncTrigger
                         }
-                        triggerFlow
-                            .mapLatest { entriesToSync() }
-                            .onStart { emit(entriesToSync()) }
+                        triggerFlow.onStart { emit(Unit) }
                     } else {
                         emptyFlow()
                     }
                 }
-                .collect { list ->
-                    // Process items concurrently to enable batching
-                    // Dependencies are still resolved correctly via syncEntryWithDependencies
-                    coroutineScope {
-                        list.map { (key, value, timestamp) ->
-                            launch {
-                                try {
-                                    syncEntryWithDependencies(key, value, timestamp)
-                                } catch (e: Exception) {
-                                    Logger.e("ESPS sync error for key $key: ${e.message}", e)
-                                    // Leave in unsyncedKeysMap for retry
+                .collect {
+                    // Evaluate entriesToSync() here (not in mapLatest) so it runs AFTER
+                    // the previous batch completes and its entries are removed from unsyncedKeysMap.
+                    val list = entriesToSync()
+                    if (list.isNotEmpty()) {
+                        // Process items concurrently to enable batching
+                        // Dependencies are still resolved correctly via syncEntryWithDependencies
+                        coroutineScope {
+                            list.map { (key, value, timestamp) ->
+                                launch {
+                                    try {
+                                        syncEntryWithDependencies(key, value, timestamp)
+                                    } catch (e: Exception) {
+                                        Logger.e("ESPS sync error for key $key: ${e.message}", e)
+                                        // Leave in unsyncedKeysMap for retry
+                                    }
                                 }
-                            }
-                        }.joinAll()
+                            }.joinAll()
+                        }
                     }
                 }
         }

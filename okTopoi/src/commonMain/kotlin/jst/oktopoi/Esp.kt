@@ -19,7 +19,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -99,14 +98,13 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
                     if (active) {
                         kotlinx.coroutines.flow
                             .merge(syncTrigger, flow { while (true) { delay(OkTopoiConstants.DEFAULT_SYNC_INTERVAL); emit(Unit) } })
-                            .mapLatest { getEntryToSync() }
-                            .onStart { emit(getEntryToSync()) }
+                            .onStart { emit(Unit) }
                     } else {
                         emptyFlow()
                     }
                 }
-                .collect { entry ->
-                    entry?.let { (propertyId, value, timestamp) ->
+                .collect {
+                    getEntryToSync()?.let { (propertyId, value, timestamp) ->
                         try {
                             outgoingSync(propertyId, value, timestamp)
                             synchronized(lock) {
