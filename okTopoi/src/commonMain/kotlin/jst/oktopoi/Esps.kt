@@ -258,7 +258,7 @@ override fun fromPersistString(string: String, fileName: String) {
         
         // setup() runs this synchronously before sync starts, so no explicit lock is required here.
         // Persistence and sync marking are suppressed via persistenceLoadDepth.
-        log.v { "[fromPersistString]\n key: $key;\n value: ${combined.value};\n syncTime: ${combined.syncTimestamp}\n" }
+//        log.v { "[fromPersistString]\n key: $key;\n value: ${combined.value};\n syncTime: ${combined.syncTimestamp}\n" }
 
         if (combined.syncTimestamp != 0L) {
             unsyncedKeysMap[key] = combined.syncTimestamp
