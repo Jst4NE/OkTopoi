@@ -24,6 +24,9 @@ import co.touchlab.kermit.Logger
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
+import kotlinx.io.buffered
+import kotlinx.io.files.Path
+import kotlinx.io.writeString
 import kotlin.time.Duration
 
 /**
@@ -147,6 +150,9 @@ open class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
 
     // Foreign key dependencies for sync ordering
     private val foreignKeyDependencies: List<SyncDependency<ValueType>>
+
+    // Callback to classify sync errors as retryable or not
+    private val isSyncErrorRetryable: (Exception) -> Boolean
     
     // Track sync jobs for cancellation and restart
     private var inboundJob: Job? = null
@@ -174,7 +180,8 @@ open class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
         syncInterval: Duration = OkTopoiConstants.DEFAULT_SYNC_INTERVAL,
         syncActive: Flow<Boolean> = MutableStateFlow(true),
         syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher),
-        foreignKeys: ForeignKeyBuilder<KeyType, ValueType>.() -> Unit = {}
+        foreignKeys: ForeignKeyBuilder<KeyType, ValueType>.() -> Unit = {},
+        isSyncErrorRetryable: (Exception) -> Boolean = { true }
     ) : super(persisted, sortingBy, secondaryKeys) {
         this.incomingSync = incomingSync
         this.outgoingSync = outgoingSync
@@ -182,6 +189,7 @@ open class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
         this.syncActive = syncActive
         this.syncScope = syncScope
         this.foreignKeyDependencies = ForeignKeyBuilder<KeyType, ValueType>().apply(foreignKeys).build()
+        this.isSyncErrorRetryable = isSyncErrorRetryable
     }
 
 override fun setup() {
@@ -236,8 +244,15 @@ override fun setup() {
                                     try {
                                         syncEntryWithDependencies(key, value, timestamp)
                                     } catch (e: Exception) {
-                                        Logger.e("ESPS sync error for key $key: ${e.message}", e)
-                                        // Leave in unsyncedKeysMap for retry
+                                        if (isSyncErrorRetryable(e)) {
+                                            Logger.e("ESPS sync error for key $key: ${e.message}", e)
+                                            // Leave in unsyncedKeysMap for retry
+                                        } else {
+                                            Logger.w("ESPS") {
+                                                "Non-retryable sync error for ${propertyName}[$key] - archiving entry: ${e.message}"
+                                            }
+                                            archiveSyncError(key, value, e)
+                                        }
                                     }
                                 }
                             }.joinAll()
@@ -449,6 +464,67 @@ override fun fromPersistString(string: String, fileName: String) {
                 syncCompletions.remove(key)?.complete(Unit)
             }
         }
+    }
+
+    /**
+     * Archives a non-retryable sync error: removes the entry from retry queue, in-memory state,
+     * and persisted file, then writes the data and error details to .oktopoi-sync-errors/ for inspection.
+     */
+    private fun archiveSyncError(key: KeyType, value: ValueType?, error: Exception) {
+        val syncTimestamp = withWriteLockBlocking {
+            // 1. Capture sync timestamp before removal
+            val ts = unsyncedKeysMap[key] ?: 0L
+            // 2. Remove from retry queue
+            unsyncedKeysMap.remove(key)
+            // 3. Remove from in-memory TreeMap (suppressed so it doesn't re-mark as unsynced)
+            inboundSuppressionDepth++
+            try { removeUnsafe(key) } finally { inboundSuppressionDepth-- }
+            ts
+        }
+
+        // 4. Archive the persisted file + write error metadata
+        try {
+            val rootDir = dirPath.parent!!.parent!!  // dirPath = rootDir/className/propertyName
+            val errorDir = Path(rootDir, ".oktopoi-sync-errors")
+            fileSystem.createDirectories(errorDir)
+
+            val timestamp = Clock.System.now().toEpochMilliseconds()
+            val serializedKey = oktopoiJson.encodeToString(persisted.keyTypeSerializer, key)
+            val baseName = "${callingClassName}.${propertyName}_${timestamp}_${serializedKey}"
+
+            // Archive the data (value + sync metadata)
+            val dataContent = if (value != null) {
+                oktopoiJson.encodeToString(
+                    PersistedValueWithSync.serializer(persisted.valueTypeSerializer),
+                    PersistedValueWithSync(value, syncTimestamp)
+                )
+            } else {
+                "null (deletion tombstone)"
+            }
+
+            fileSystem.sink(Path(errorDir, baseName)).buffered().use {
+                it.writeString(dataContent)
+            }
+
+            // Write error context
+            val errorContent = buildString {
+                appendLine("Error Class: ${error::class.simpleName}")
+                appendLine("Message: ${error.message}")
+                appendLine("---")
+                appendLine("Stack Trace:")
+                appendLine(error.stackTraceToString())
+            }
+            fileSystem.sink(Path(errorDir, "$baseName.error")).buffered().use {
+                it.writeString(errorContent)
+            }
+        } catch (archiveError: Exception) {
+            Logger.e("OkTopoi-SyncErrorArchive", archiveError) {
+                "Failed to archive sync error for ${propertyName}[$key]"
+            }
+        }
+
+        // 5. Delete the original persisted file
+        try { deleteFromFile(key) } catch (_: Exception) {}
     }
 
     // Primary sync methods removed - use regular operations which auto-mark as unsynced
