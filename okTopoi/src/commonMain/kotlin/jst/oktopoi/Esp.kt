@@ -113,7 +113,7 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
                             // Persist the updated sync state to avoid re-sync on app restart
                             persistValue(super.value)
                         } catch (e: Exception) {
-                            Logger.e("OkTopoi-Esp", e) { "Error in outbound sync for $propertyId" }
+                            Logger.e(e, tag = "OkTopoi-Esp") { "Error in outbound sync for $propertyId" }
                         }
                     }
                 }

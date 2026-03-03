@@ -245,10 +245,10 @@ override fun setup() {
                                         syncEntryWithDependencies(key, value, timestamp)
                                     } catch (e: Exception) {
                                         if (isSyncErrorRetryable(e)) {
-                                            Logger.e("ESPS sync error for key $key: ${e.message}", e)
+                                            Logger.e(e, tag = "OkTopoi-Esps") { "ESPS sync error for key $key: ${e.message}" }
                                             // Leave in unsyncedKeysMap for retry
                                         } else {
-                                            Logger.w("ESPS") {
+                                            Logger.w(tag = "ESPS") {
                                                 "Non-retryable sync error for ${propertyName}[$key] - archiving entry: ${e.message}"
                                             }
                                             archiveSyncError(key, value, e)
@@ -518,7 +518,7 @@ override fun fromPersistString(string: String, fileName: String) {
                 it.writeString(errorContent)
             }
         } catch (archiveError: Exception) {
-            Logger.e("OkTopoi-SyncErrorArchive", archiveError) {
+            Logger.e(archiveError, tag = "OkTopoi-SyncErrorArchive") {
                 "Failed to archive sync error for ${propertyName}[$key]"
             }
         }

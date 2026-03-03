@@ -147,7 +147,7 @@ open class Ep<ValueType : Any?> : E<ValueType> {
                         super.value = decodeValue(content) as ValueType
                     } catch (e: Exception) {
                         // Archive corrupted file and log error, but don't crash
-                        Logger.e("OkTopoi-Ep", e) {
+                        Logger.e(e, tag = "OkTopoi-Ep") {
                             "Failed to deserialize ${callingClassName}.${propertyName}: ${e.message}\n" +
                             "Using default value instead. Corrupted file archived."
                         }
@@ -287,7 +287,7 @@ open class Ep<ValueType : Any?> : E<ValueType> {
                 fileSystem.source(filePath).buffered().use { it.readString() }
             } else null
         } catch (e: Exception) {
-            Logger.e("OkTopoi-Ep", e) { "Error reading from $filePath" }
+            Logger.e(e, tag = "OkTopoi-Ep") { "Error reading from $filePath" }
             null
         }
     }

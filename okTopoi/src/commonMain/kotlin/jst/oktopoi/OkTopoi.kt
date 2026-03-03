@@ -78,21 +78,21 @@ internal fun archiveCorruptedFile(
         // Move the corrupted file to error archive
         fileSystem.atomicMove(filePath, archivedPath)
 
-        Logger.w("OkTopoi-ErrorArchive") {
+        Logger.w(tag = "OkTopoi-ErrorArchive") {
             "Archived corrupted file to .oktopoi-errors/: $originalFileName → $archivedFileName"
         }
         true
     } catch (e: Exception) {
-        Logger.e("OkTopoi-ErrorArchive", e) {
+        Logger.e(e, tag = "OkTopoi-ErrorArchive") {
             "Failed to archive corrupted file: ${filePath.name}"
         }
         // Try to delete the corrupted file as fallback
         try {
             fileSystem.delete(filePath)
-            Logger.w("OkTopoi-ErrorArchive") { "Deleted corrupted file: ${filePath.name}" }
+            Logger.w(tag = "OkTopoi-ErrorArchive") { "Deleted corrupted file: ${filePath.name}" }
             true
         } catch (deleteError: Exception) {
-            Logger.e("OkTopoi-ErrorArchive", deleteError) {
+            Logger.e(deleteError, tag = "OkTopoi-ErrorArchive") {
                 "Failed to delete corrupted file: ${filePath.name}"
             }
             false
@@ -105,15 +105,15 @@ internal val initDefaultIO = MutableStateFlow<Pair<Path, FileSystem>?>(null)
 internal val initIO = MutableStateFlow<Pair<Path, FileSystem>?>(null)
 
 fun initDefaultIO(defaultRootDir: Path, fileSystem: FileSystem = SystemFileSystem) {
-    Logger.d("OkTopoi-Init") { "initDefaultIO called with rootDir: $defaultRootDir, fileSystem: $fileSystem" }
+    Logger.d(tag = "OkTopoi-Init") { "initDefaultIO called with rootDir: $defaultRootDir, fileSystem: $fileSystem" }
     initDefaultIO.value = Pair(defaultRootDir, fileSystem)
-    Logger.d("OkTopoi-Init") { "initDefaultIO set successfully" }
+    Logger.d(tag = "OkTopoi-Init") { "initDefaultIO set successfully" }
 }
 
 fun initRootDirIO(initRootDir: Path, fileSystem: FileSystem = SystemFileSystem) {
-    Logger.d("OkTopoi-Init") { "initRootDirIO called with rootDir: $initRootDir, fileSystem: $fileSystem" }
+    Logger.d(tag = "OkTopoi-Init") { "initRootDirIO called with rootDir: $initRootDir, fileSystem: $fileSystem" }
     initIO.value = Pair(initRootDir, fileSystem)
-    Logger.d("OkTopoi-Init") { "initRootDirIO set successfully" }
+    Logger.d(tag = "OkTopoi-Init") { "initRootDirIO set successfully" }
 }
 
 

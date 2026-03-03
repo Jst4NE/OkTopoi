@@ -171,7 +171,7 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
                                 }
                         } catch (e: Exception) {
                             // Archive corrupted file and continue loading other entries
-                            Logger.e("OkTopoi-Eps", e) {
+                            Logger.e(e, tag = "OkTopoi-Eps") {
                                 "Failed to deserialize entry from ${file.name} in ${callingClassName}.${propertyName}: ${e.message}\n" +
                                 "Skipping this entry. Corrupted file archived."
                             }
