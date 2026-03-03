@@ -66,7 +66,7 @@ kotlin {
 
                 api(libs.kotlinx.io.core)
 
-                api(compose.runtime)
+                api(libs.compose.runtime)
                 api(libs.lifecycle.runtime.compose)
 
                 implementation(libs.kermit)
