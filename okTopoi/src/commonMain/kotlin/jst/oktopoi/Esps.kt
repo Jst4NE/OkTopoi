@@ -307,7 +307,7 @@ override fun fromPersistString(string: String, fileName: String) {
      * @param timestamp The sync timestamp
      * @param synced Whether the sync was actually performed (false if rejected due to timestamp)
      */
-    protected open fun onAfterFromSync(key: KeyType, value: ValueType?, timestamp: Long, synced: Boolean) {}
+    protected open suspend fun onAfterFromSync(key: KeyType, value: ValueType?, timestamp: Long, synced: Boolean) {}
 
     /**
      * Inserts a value received from sync and marks it as synced.
