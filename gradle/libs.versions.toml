@@ -8,12 +8,12 @@ kotlinxSerializationJson = "1.10.0"
 
 kermit = "2.1.0"
 
-compose-multiplatform = "1.10.1"
+compose-multiplatform = "1.10.2"
 
 agp = "9.0.1"
 android-minSdk = "24"
 android-compileSdk = "36"
-compose-runtime = "1.10.4"
+compose-runtime = "1.10.5"
 lifecycleRuntimeCompose = "2.10.0"
 
 
