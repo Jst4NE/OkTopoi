@@ -38,12 +38,17 @@ import kotlinx.coroutines.launch
  * @param V the value type of the source Es collection
  * @param T the common result type that all sources project into
  * @param es the source Es collection
+ * @param filter optional fast pre-filter that runs before [project]. Plain function (no suspend,
+ *               no JoinContext) for cheaply rejecting entries based on their own fields before the
+ *               heavier projection runs. Entries rejected by filter are not tracked for dependencies.
+ *               Default accepts all entries.
  * @param project projection function that maps an entry to the common type.
  *                 Returns null to exclude the entry. Receives a [JoinContext] for
  *                 fetching related data with automatic dependency tracking.
  */
 class MergeSource<K : Any, V : Any, T : Any>(
     val es: Es<K, V>,
+    val filter: (Map.Entry<K, V>) -> Boolean = { true },
     val project: suspend (entry: Map.Entry<K, V>, context: JoinContext) -> T?,
 )
 
@@ -61,6 +66,10 @@ class MergeSource<K : Any, V : Any, T : Any>(
  * @param es the source Es collection
  * @param groupKey the name of the secondary index used for grouping.
  *                 The secondary index must be defined on the Es collection.
+ * @param filter optional fast pre-filter that runs before [project]. Plain function (no suspend,
+ *               no JoinContext) for cheaply rejecting entries based on their own fields before the
+ *               heavier projection runs. Entries rejected by filter are not tracked for dependencies.
+ *               Default accepts all entries.
  * @param project projection function that maps an entry to the common type.
  *                 Returns null to exclude the entry. Receives a [JoinContext] for
  *                 fetching related data with automatic dependency tracking.
@@ -68,6 +77,7 @@ class MergeSource<K : Any, V : Any, T : Any>(
 class GroupedMergeSource<K : Any, V : Any, G : Any, T : Any>(
     val es: Es<K, V>,
     val groupKey: String,
+    val filter: (Map.Entry<K, V>) -> Boolean = { true },
     val project: suspend (entry: Map.Entry<K, V>, context: JoinContext) -> T?,
 )
 
@@ -82,8 +92,9 @@ class GroupedMergeSource<K : Any, V : Any, G : Any, T : Any>(
  * ```
  */
 fun <K : Any, V : Any, T : Any> Es<K, V>.asMergeSource(
+    filter: (Map.Entry<K, V>) -> Boolean = { true },
     project: suspend (entry: Map.Entry<K, V>, context: JoinContext) -> T?,
-) = MergeSource(this, project)
+) = MergeSource(this, filter, project)
 
 /**
  * Convenience extension to create a [GroupedMergeSource] from an Es collection.
@@ -96,8 +107,9 @@ fun <K : Any, V : Any, T : Any> Es<K, V>.asMergeSource(
  */
 fun <K : Any, V : Any, G : Any, T : Any> Es<K, V>.asGroupedMergeSource(
     groupKey: String,
+    filter: (Map.Entry<K, V>) -> Boolean = { true },
     project: suspend (entry: Map.Entry<K, V>, context: JoinContext) -> T?,
-) = GroupedMergeSource<K, V, G, T>(this, groupKey, project)
+) = GroupedMergeSource<K, V, G, T>(this, groupKey, filter, project)
 
 // ============================================================================
 // Composite key for tracking items across multiple sources
@@ -223,6 +235,8 @@ fun <T : Any> mergedSnapshotStateList(
     ): T? {
         val source = sources[sourceIndex] as MergeSource<Any, Any, T>
         val entry = MapEntry(key, value)
+        // Fast pre-filter: reject before expensive projection
+        if (!source.filter(entry)) return null
         val context = JoinContext()
         val projected = source.project(entry, context)
         val mergeKey = MergeKey(sourceIndex, key)
@@ -501,6 +515,8 @@ fun <G : Any, T : Any> mergedSnapshotStateMap(
     suspend fun projectEntry(sourceIndex: Int, key: Any, value: Any): T? {
         val source = sources[sourceIndex] as GroupedMergeSource<Any, Any, G, T>
         val entry = MapEntry(key, value)
+        // Fast pre-filter: reject before expensive projection
+        if (!source.filter(entry)) return null
         val context = JoinContext()
         val projected = source.project(entry, context)
         val mergeKey = MergeKey(sourceIndex, key)
