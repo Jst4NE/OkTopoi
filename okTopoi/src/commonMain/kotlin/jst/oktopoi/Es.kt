@@ -1837,7 +1837,7 @@ class JoinContext internal constructor() {
  * to use from any dispatcher (Dispatchers.Main, Default, IO, etc.). All public methods
  * are suspend functions to enable non-blocking synchronization.
  */
-private class JoinDependencyTracker<PK : Any> {
+internal class JoinDependencyTracker<PK : Any> {
     private val mutex = Mutex()
 
     // Forward: which dependencies does each primary entry have?
@@ -2077,7 +2077,7 @@ private class JoinDependencyTracker<PK : Any> {
 /**
  * Helper to find insertion point for a mapped entry in a sorted list.
  */
-private fun <K : Any, T : Any> findMappedInsertionPoint(
+internal fun <K : Any, T : Any> findMappedInsertionPoint(
     list: SnapshotStateList<Map.Entry<K, T>>,
     entry: Map.Entry<K, T>,
     comparator: Comparator<Map.Entry<K, T>>
