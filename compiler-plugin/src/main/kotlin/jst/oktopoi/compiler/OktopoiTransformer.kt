@@ -35,23 +35,16 @@ import org.jetbrains.kotlin.ir.util.functions
 import org.jetbrains.kotlin.ir.util.hasAnnotation
 import org.jetbrains.kotlin.ir.util.isSubtypeOfClass
 import org.jetbrains.kotlin.ir.util.properties
-import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 
 class OktopoiTransformer(
     private val pluginContext: IrPluginContext,
-    private val messageCollector: MessageCollector
+    private val messageCollector: MessageCollector,
+    private val eSymbol: IrClassSymbol?,
+    private val esSymbol: IrClassSymbol?
 ) : IrElementTransformerVoidWithContext() {
 
     private val newInstanceAnnotation = FqName("jst.oktopoi.OktopoiNewInstanceFactory")
-    private val eBaseFqName = FqName("jst.oktopoi.E")
-    private val esBaseFqName = FqName("jst.oktopoi.Es")
-
-    // Cache base class symbols for faster subtype checks
-    private val eClassId: ClassId = ClassId.Companion.topLevel(eBaseFqName)
-    private val esClassId: ClassId = ClassId.Companion.topLevel(esBaseFqName)
-    private val eSymbol: IrClassSymbol? = pluginContext.referenceClass(eClassId)
-    private val esSymbol: IrClassSymbol? = pluginContext.referenceClass(esClassId)
 
     // Memoization caches for member lookups (per class symbol, per name)
     private val propertyCache = mutableMapOf<Pair<IrClassSymbol, String>, IrProperty?>()
