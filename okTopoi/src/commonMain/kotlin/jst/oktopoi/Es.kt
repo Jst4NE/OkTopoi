@@ -256,9 +256,9 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      */
     @Composable
     fun asSnapshotStateList(
-        entryComparator: Comparator<Map.Entry<KeyType, ValueType>>? = null,
-        filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
-        initialEntriesProvider: (suspend () -> Collection<Map.Entry<KeyType, ValueType>>) = { entries() },
+        @WrapInRemember entryComparator: Comparator<Map.Entry<KeyType, ValueType>>? = null,
+        @WrapInRemember filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        @WrapInRemember initialEntriesProvider: (suspend () -> Collection<Map.Entry<KeyType, ValueType>>) = { entries() },
         lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, ValueType>> {
@@ -365,8 +365,8 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     @Composable
     fun <SK : Any> asSnapshotStateMapBySecondaryKey(
         groupByKey: String,
-        entryComparator: Comparator<Map.Entry<KeyType, ValueType>>,
-        filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        @WrapInRemember entryComparator: Comparator<Map.Entry<KeyType, ValueType>>,
+        @WrapInRemember filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
         lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateMap<SK, SnapshotStateList<Map.Entry<KeyType, ValueType>>> {
@@ -526,34 +526,28 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     @Composable
     fun asSnapshotStateListBySecondaryKey(
         vararg criteria: Pair<String, Any?>,
-        entryComparator: Comparator<Map.Entry<KeyType, ValueType>>,
-        filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        @WrapInRemember entryComparator: Comparator<Map.Entry<KeyType, ValueType>>,
+        @WrapInRemember filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
         lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, ValueType>> {
 
-        val initialEntriesProvider = remember(*criteria) {
-            suspend {
+        return asSnapshotStateList(
+            entryComparator = entryComparator,
+            filter = { entry ->
+                val passesFilter = filter?.invoke(entry) != false
+                val passesCriteria = criteria.all { (indexName, expectedValue) ->
+                    getSecondaryKey(indexName, entry.value) == expectedValue
+                }
+                passesFilter && passesCriteria
+            },
+            initialEntriesProvider = {
                 val entries = mutableListOf<MapEntry<KeyType, ValueType>>()
                 forEachBy(*criteria) { key, value -> entries.add(MapEntry(key, value)) }
                 entries
-            }
-        }
-
-        val filterWithCriteria: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean) = { entry ->
-            val passesFilter = filter?.invoke(entry) != false
-            val passesCriteria = criteria.all { (indexName, expectedValue) ->
-                getSecondaryKey(indexName, entry.value) == expectedValue
-            }
-            passesFilter && passesCriteria
-        }
-
-        return asSnapshotStateList(
-            entryComparator = entryComparator,
-            filter = filterWithCriteria,
-            initialEntriesProvider = initialEntriesProvider,
+            },
             lifecycleOwner = lifecycleOwner,
-            minActiveState = minActiveState
+            minActiveState = minActiveState,
         )
     }
 
@@ -608,7 +602,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     @Composable
     fun asSnapshotStateListBySecondaryKey(
         vararg criteria: Pair<String, Comparable<*>?>,
-        filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        @WrapInRemember filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
         lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, ValueType>> {
@@ -839,7 +833,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     fun <T> mapState(
         key: KeyType,
         vararg dependencies: Any?,
-        transform: suspend (ValueType?) -> T?
+        @WrapInRemember transform: suspend (ValueType?) -> T?
     ): State<T?> {
         val sourceState = asState(key)
         val transformedState = remember { mutableStateOf<T?>(null) }
@@ -901,7 +895,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         key: KeyType,
         initialValue: ValueType? = null,
         vararg dependencies: Any?,
-        transform: suspend (ValueType?) -> T?
+        @WrapInRemember transform: suspend (ValueType?) -> T?
     ): State<T?> {
         val sourceState = asState(key, initialValue)
         val transformedState = remember { mutableStateOf<T?>(null) }
@@ -981,7 +975,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     @Composable
     fun <T> mapState(
         vararg dependencies: Any?,
-        transform: suspend (Es<KeyType, ValueType>) -> T?
+        @WrapInRemember transform: suspend (Es<KeyType, ValueType>) -> T?
     ): State<T?> {
         val transformedState = remember { mutableStateOf<T?>(null) }
 
@@ -1084,8 +1078,8 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      */
     @Composable
     fun <T : Any> asSnapshotStateListWithJoins(
-        entryComparator: Comparator<Map.Entry<KeyType, T>>,
-        filterMap: suspend (entry: Map.Entry<KeyType, ValueType>, context: JoinContext) -> T?,
+        @WrapInRemember entryComparator: Comparator<Map.Entry<KeyType, T>>,
+        @WrapInRemember filterMap: suspend (entry: Map.Entry<KeyType, ValueType>, context: JoinContext) -> T?,
         lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, T>> {
@@ -1333,9 +1327,9 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      */
     @Composable
     fun <SK : Any, T : Any> asSnapshotStateMapWithJoins(
-        groupByKey: (T) -> SK?,
-        entryComparator: Comparator<Map.Entry<KeyType, T>>,
-        filterMap: suspend (entry: Map.Entry<KeyType, ValueType>, context: JoinContext) -> T?,
+        @WrapInRemember groupByKey: (T) -> SK?,
+        @WrapInRemember entryComparator: Comparator<Map.Entry<KeyType, T>>,
+        @WrapInRemember filterMap: suspend (entry: Map.Entry<KeyType, ValueType>, context: JoinContext) -> T?,
         lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateMap<SK, SnapshotStateList<Map.Entry<KeyType, T>>> {
@@ -1621,7 +1615,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     @Composable
     fun <R : Any> asSnapshotStateMapTransformed(
         vararg dependencies: Any?,
-        transform: suspend (Map.Entry<KeyType, ValueType>) -> R?
+        @WrapInRemember transform: suspend (Map.Entry<KeyType, ValueType>) -> R?
     ): SnapshotStateMap<KeyType, R> {
         val resultMap = remember { mutableStateMapOf<KeyType, R>() }
 
@@ -2229,8 +2223,9 @@ private fun <K : Any, V : Any> handleRemoveInSortedList(
  *         it.name.uppercase()
  *     }
  *
- *     // With dependencies - recompute when locale changes
- *     val localizedName by rememberTransformed(warehouse, locale) {
+ *     // Captured state reacts automatically — `locale` is tracked by the
+ *     // OkTopoi compiler plugin and keyed into remember.
+ *     val localizedName by rememberTransformed(warehouse) {
  *         it.name.uppercase(locale)
  *     }
  *
@@ -2251,17 +2246,17 @@ private fun <K : Any, V : Any> handleRemoveInSortedList(
  * @param T the type of the input value
  * @param R the type of the transformed result
  * @param value the value to transform
- * @param dependencies optional dependencies that trigger re-transformation when changed
- * @param transform function to transform the value (receives value, returns transformed result or null)
- * @return reactive State that updates when value or dependencies change
+ * @param transform function to transform the value (receives value, returns transformed result or null).
+ *   Reactive state captured inside the lambda is tracked by the OkTopoi compiler plugin and keyed
+ *   automatically — no manual dependency list required.
+ * @return reactive State that updates when value or any captured reactive state changes
  */
 @Composable
 fun <T, R> rememberTransformed(
     value: T,
-    vararg dependencies: Any?,
-    transform: (T) -> R?
+    @WrapInRemember transform: (T) -> R?
 ): State<R?> {
-    return remember(value, *dependencies) {
+    return remember(value, transform) {
         mutableStateOf(transform(value))
     }
 }
@@ -2321,12 +2316,13 @@ fun <T, R> rememberTransformed(
  *     Text(partnerName)
  * }
  *
- * // With dependencies
+ * // Captured reactive state is tracked automatically
  * @Composable
  * fun JourneyProgress(journey: JourneyDto, refresh: Boolean) {
- *     // Recompute when refresh changes
- *     val progress by rememberSuspendTransformed(journey, refresh) {
- *         it.computeProgress()  // suspend function
+ *     // `refresh` is captured by the lambda — the plugin keys remember on it,
+ *     // so flipping it re-runs the transform.
+ *     val progress by rememberSuspendTransformed(journey) {
+ *         if (refresh) it.computeProgress() else it.cachedProgress()
  *     }
  *
  *     CircularProgressIndicator(progress = progress ?: 0f)
@@ -2349,19 +2345,19 @@ fun <T, R> rememberTransformed(
  * @param T the type of the input value
  * @param R the type of the transformed result
  * @param value the value to transform
- * @param dependencies optional dependencies that trigger re-transformation when changed
- * @param transform suspend function to transform the value (receives value, returns transformed result or null)
- * @return reactive State that updates when value or dependencies change
+ * @param transform suspend function to transform the value (receives value, returns transformed result or null).
+ *   Reactive state captured inside the lambda is tracked by the OkTopoi compiler plugin and keyed
+ *   automatically — no manual dependency list required.
+ * @return reactive State that updates when value or any captured reactive state changes
  */
 @Composable
 fun <T, R> rememberSuspendTransformed(
     value: T,
-    vararg dependencies: Any?,
-    transform: suspend (T) -> R?
+    @WrapInRemember transform: suspend (T) -> R?
 ): State<R?> {
     val state = remember { mutableStateOf<R?>(null) }
 
-    LaunchedEffect(value, *dependencies) {
+    LaunchedEffect(value, transform) {
         state.value = transform(value)
     }
 

@@ -203,8 +203,8 @@ private sealed interface MergeEvent {
  */
 @Composable
 fun <T : Any> mergedSnapshotStateList(
-    vararg sources: MergeSource<*, *, T>,
-    comparator: Comparator<T>,
+    @WrapInRemember vararg sources: MergeSource<*, *, T>,
+    @WrapInRemember comparator: Comparator<T>,
     lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
     minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
 ): SnapshotStateList<T> {
@@ -474,8 +474,8 @@ fun <T : Any> mergedSnapshotStateList(
  */
 @Composable
 fun <G : Any, T : Any> mergedSnapshotStateMap(
-    vararg sources: GroupedMergeSource<*, *, G, T>,
-    comparator: Comparator<T>,
+    @WrapInRemember vararg sources: GroupedMergeSource<*, *, G, T>,
+    @WrapInRemember comparator: Comparator<T>,
     lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
     minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
 ): SnapshotStateMap<G, SnapshotStateList<T>> {

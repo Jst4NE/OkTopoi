@@ -28,6 +28,7 @@ class OktopoiIrGenerationExtension(
 
             moduleFragment
                 .transform(OktopoiTransformer(pluginContext, messageCollector, eSymbol, esSymbol), null)
+                .transform(ComposeCallSiteRememberWrapper(pluginContext, messageCollector), null)
                 .transform(RunBlockingMultiplatformInliner(pluginContext), null)
         } catch (e: Exception) {
             messageCollector.report(CompilerMessageSeverity.ERROR, "[OktopoiPlugin] Transformation error: ${e.message}")
