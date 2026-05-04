@@ -116,6 +116,15 @@ class ReadWriteLock {
                         continuation.invokeOnCancellation {
                             waitingWriter.store(null)
                         }
+                        // Race fix: the last reader may have checked waitingWriter before we
+                        // stored the continuation and found null, so it skipped the resume.
+                        // Re-check after storing; if count is already 0, self-resume via CAS
+                        // to avoid a double-resume race with any concurrent reader.
+                        if (readerCount.load() == 0) {
+                            if (waitingWriter.compareAndExchange(continuation, null) == continuation) {
+                                continuation.resume(Unit)
+                            }
+                        }
                     }
                     return block()
                 }

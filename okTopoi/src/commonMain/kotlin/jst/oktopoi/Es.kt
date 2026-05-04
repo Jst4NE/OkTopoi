@@ -21,6 +21,8 @@ import jst.oktopoi.TreeMap.MapChange.Cleared
 import jst.oktopoi.TreeMap.MapChange.Put
 import jst.oktopoi.TreeMap.MapChange.Rebuild
 import jst.oktopoi.TreeMap.MapChange.Removed
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.coroutineScope
@@ -32,6 +34,8 @@ import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.concurrent.atomics.decrementAndFetch
+import kotlin.concurrent.atomics.incrementAndFetch
 
 /**
  * Reactive observable collection that extends TreeMap with change notifications and UI integrations.
@@ -119,6 +123,7 @@ import kotlinx.coroutines.sync.withLock
  * @see esps for synchronized collections  
  * @see TreeMap for the underlying map implementation
  */
+@OptIn(ExperimentalAtomicApi::class)
 open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
     private val log = Logger.withTag(this::class.simpleName.toString())
@@ -126,9 +131,13 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     // Flow-based change notifications for reactive programming
     private val _changeFlow = MutableSharedFlow<MapChange<KeyType, ValueType>>(
         replay = 0,
-        extraBufferCapacity = OkTopoiConstants.DEFAULT_CHANGE_FLOW_BUFFER_SIZE, 
+        extraBufferCapacity = OkTopoiConstants.DEFAULT_CHANGE_FLOW_BUFFER_SIZE,
         onBufferOverflow = BufferOverflow.SUSPEND
     )
+
+    // Depth counter for bulk change suppression. When > 0, individual Put/Remove events are
+    // suppressed and a single Rebuild is emitted when depth returns to 0.
+    private val bulkChangeDepth = AtomicInt(0)
     
     /**
      * Flow of changes made to this Es.
@@ -154,9 +163,29 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     }
     
     /**
+     * Begins a bulk operation. While depth > 0, individual Put/Remove change events are
+     * suppressed. Call [endBulkChanges] when done — it emits a single Rebuild so consumers
+     * re-read the full state once rather than processing thousands of individual events.
+     */
+    fun beginBulkChanges() {
+        bulkChangeDepth.incrementAndFetch()
+    }
+
+    /**
+     * Ends a bulk operation. Emits a single Rebuild event when the outermost bulk scope closes.
+     */
+    fun endBulkChanges() {
+        if (bulkChangeDepth.decrementAndFetch() == 0) {
+            emitChange(Rebuild())
+        }
+    }
+
+    /**
      * Emit a change notification to the flow.
+     * Suppressed (except for Rebuild) while inside a bulk operation.
      */
     protected fun emitChange(change: MapChange<KeyType, ValueType>) {
+        if (bulkChangeDepth.load() > 0 && change !is Rebuild) return
         val success = _changeFlow.tryEmit(change)
         if (!success) {
             throw IllegalStateException("Change flow buffer overflow. Consider increasing buffer size or adding .buffer() to your flow consumer.")

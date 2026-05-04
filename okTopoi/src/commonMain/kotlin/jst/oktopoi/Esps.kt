@@ -353,6 +353,20 @@ override fun fromPersistString(string: String, fileName: String) {
         return synced
     }
 
+    /**
+     * Inserts a batch of values received from sync, suppressing per-item change events.
+     * A single Rebuild is emitted after all items are inserted so consumers re-read full state.
+     * Use this for large initial fetches to avoid flooding the change flow buffer.
+     */
+    suspend fun fromSyncBatch(items: List<Triple<KeyType, ValueType?, Long>>) {
+        beginBulkChanges()
+        try {
+            items.forEach { (key, value, timestamp) -> fromSync(key, value, timestamp) }
+        } finally {
+            endBulkChanges()
+        }
+    }
+
 
     suspend fun entriesToSync(): List<Triple<KeyType, ValueType?, Long>> {
         return withWriteLock {
