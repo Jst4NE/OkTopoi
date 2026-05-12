@@ -35,12 +35,27 @@ import kotlin.time.Duration
  *
  * @param value The actual stored value (nullable)
  * @param syncTimestamp Sync state indicator: 0 = synced, >0 = unsynced timestamp, <0 = deleted timestamp
+ * @param lastSyncedValue Snapshot of the last server-confirmed value, kept only while the entry is unsynced.
+ *   Non-null means a local edit overwrote a previously-synced value; used to roll back on non-retryable
+ *   sync failure. Null means either the entry is synced (no rollback needed) or the entry was locally
+ *   created/re-created with no prior synced state (archive-and-remove on failure).
  */
 @Serializable
 private data class PersistedValueWithSync<T>(
     val value: T?,
-    val syncTimestamp: Long  // 0 = synced, >0 = unsynced timestamp, <0 = deleted timestamp
+    val syncTimestamp: Long,  // 0 = synced, >0 = unsynced timestamp, <0 = deleted timestamp
+    val lastSyncedValue: T? = null  // Omitted from JSON when null (encodeDefaults=false)
 )
+
+/**
+ * In-memory entry tracking a pending outbound sync.
+ *
+ * @param timestamp Sync timestamp: >0 = pending upsert, <0 = pending delete
+ * @param lastSyncedValue Snapshot of the prior server-confirmed value (null if no prior state).
+ *   Captured on the first local edit while synced; preserved across subsequent edits while pending
+ *   (first-edit-wins). Used by archiveSyncError to roll back on non-retryable failure.
+ */
+private data class UnsyncedEntry<V>(val timestamp: Long, val lastSyncedValue: V?)
 
 /**
  * Type-erased interface for sync dependency checking.
@@ -136,7 +151,7 @@ open class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
 
     private val log = Logger.withTag(this::class.simpleName.toString())
 
-    private val unsyncedKeysMap: MutableMap<KeyType, Long> = mutableMapOf() // Keys that need syncing (timestamp)
+    private val unsyncedKeysMap: MutableMap<KeyType, UnsyncedEntry<ValueType>> = mutableMapOf() // Keys that need syncing (timestamp + last synced value for rollback)
     private val syncTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1) // Triggers sync flow
 
     // Sync interval: ZERO = immediate, INFINITE = disabled, >0 = periodic fallback
@@ -276,7 +291,7 @@ override fun fromPersistString(string: String, fileName: String) {
 //        log.v { "[fromPersistString]\n key: $key;\n value: ${combined.value};\n syncTime: ${combined.syncTimestamp}\n" }
 
         if (combined.syncTimestamp != 0L) {
-            unsyncedKeysMap[key] = combined.syncTimestamp
+            unsyncedKeysMap[key] = UnsyncedEntry(combined.syncTimestamp, combined.lastSyncedValue)
         }
         
         // Only restore to TreeMap if not deleted (value exists and timestamp >= 0)
@@ -324,7 +339,7 @@ override fun fromPersistString(string: String, fileName: String) {
         onBeforeFromSync(key, value, timestamp, force)
 
         val synced = withWriteLock {
-            val currentTimestamp = unsyncedKeysMap[key] ?: 0L
+            val currentTimestamp = unsyncedKeysMap[key]?.timestamp ?: 0L
 
             log.d { "[${this@Esps.callingClassName}.${this@Esps.propertyName}] currentTimestamp: $currentTimestamp; incomingTimestamp: $timestamp" }
 
@@ -371,7 +386,8 @@ override fun fromPersistString(string: String, fileName: String) {
     suspend fun entriesToSync(): List<Triple<KeyType, ValueType?, Long>> {
         return withWriteLock {
             val keysToRemove = mutableListOf<KeyType>()
-            val result = unsyncedKeysMap.mapNotNull { (key, timestamp) ->
+            val result = unsyncedKeysMap.mapNotNull { (key, entry) ->
+                val timestamp = entry.timestamp
                 if (timestamp > 0) {
                     // Active entry - check if still exists in TreeMap
                     val value = getUnsafe(key)
@@ -401,7 +417,7 @@ override fun fromPersistString(string: String, fileName: String) {
      */
     internal suspend fun getUnsyncedTimestamp(key: KeyType): Long? {
         return withReadLock {
-            unsyncedKeysMap[key]
+            unsyncedKeysMap[key]?.timestamp
         }
     }
 
@@ -481,19 +497,42 @@ override fun fromPersistString(string: String, fileName: String) {
     }
 
     /**
-     * Archives a non-retryable sync error: removes the entry from retry queue, in-memory state,
-     * and persisted file, then writes the data and error details to .oktopoi-sync-errors/ for inspection.
+     * Archives a non-retryable sync error.
+     *
+     * If a `lastSyncedValue` is available, rolls the in-memory and persisted state back to it
+     * (entry returns to synced state, matching the server's view). Otherwise removes the entry
+     * entirely (the original behavior — used when there's no prior synced state to recover to).
+     *
+     * In both cases, the failed value and error details are archived under .oktopoi-sync-errors/
+     * for inspection.
      */
     private fun archiveSyncError(key: KeyType, value: ValueType?, error: Exception) {
-        val syncTimestamp = withWriteLockBlocking {
-            // 1. Capture sync timestamp before removal
-            val ts = unsyncedKeysMap[key] ?: 0L
+        val (syncTimestamp, rolledBackTo) = withWriteLockBlocking {
+            // 1. Capture sync state before mutation
+            val entry = unsyncedKeysMap[key]
+            val ts = entry?.timestamp ?: 0L
+            val lastSyncedValue = entry?.lastSyncedValue
             // 2. Remove from retry queue
             unsyncedKeysMap.remove(key)
-            // 3. Remove from in-memory TreeMap (suppressed so it doesn't re-mark as unsynced)
+            // 3. Either roll back to last synced value or remove from in-memory TreeMap
+            //    (suppressed so the put/remove doesn't re-mark as unsynced)
             inboundSuppressionDepth++
-            try { removeUnsafe(key) } finally { inboundSuppressionDepth-- }
-            ts
+            try {
+                if (lastSyncedValue != null) {
+                    putUnsafe(key, lastSyncedValue)
+                } else {
+                    removeUnsafe(key)
+                }
+            } finally { inboundSuppressionDepth-- }
+            ts to lastSyncedValue
+        }
+
+        if (rolledBackTo != null) {
+            // Persist the rolled-back value as synced (syncTimestamp=0, no lastSyncedValue)
+            try { persistEntry(key, rolledBackTo) } catch (_: Exception) {}
+            Logger.w(tag = "ESPS") {
+                "Non-retryable sync error for ${propertyName}[$key] - rolled back to last synced value: ${error.message}"
+            }
         }
 
         // 4. Archive the persisted file + write error metadata
@@ -537,15 +576,21 @@ override fun fromPersistString(string: String, fileName: String) {
             }
         }
 
-        // 5. Delete the original persisted file
-        try { deleteFromFile(key) } catch (_: Exception) {}
+        // 5. Delete the original persisted file (only if we didn't roll back —
+        //    rollback already overwrote it with the synced value via persistEntry above)
+        if (rolledBackTo == null) {
+            try { deleteFromFile(key) } catch (_: Exception) {}
+        }
     }
 
     // Primary sync methods removed - use regular operations which auto-mark as unsynced
 
     fun syncEntry(key: KeyType) {
         withWriteLockBlocking {
-            unsyncedKeysMap[key] = Clock.System.now().toEpochMilliseconds()
+            val ts = Clock.System.now().toEpochMilliseconds()
+            // Preserve any existing lastSyncedValue (manual re-queue isn't a value change)
+            val existing = unsyncedKeysMap[key]
+            unsyncedKeysMap[key] = UnsyncedEntry(ts, existing?.lastSyncedValue)
             syncTrigger.tryEmit(Unit)
         }
     }
@@ -606,13 +651,15 @@ override fun fromPersistString(string: String, fileName: String) {
      * Override persistence to handle sync-aware format and deletion tombstones.
      */
     override fun persistEntry(key: KeyType, value: ValueType?) {
-        val syncTimestamp = unsyncedKeysMap[key] ?: 0L
-        
+        val unsynced = unsyncedKeysMap[key]
+        val syncTimestamp = unsynced?.timestamp ?: 0L
+        val lastSyncedValue = unsynced?.lastSyncedValue
+
         if (value != null) {
             // Write with sync metadata
             val content = oktopoiJson.encodeToString(
                 PersistedValueWithSync.serializer(persisted.valueTypeSerializer),
-                PersistedValueWithSync(value, syncTimestamp)
+                PersistedValueWithSync(value, syncTimestamp, lastSyncedValue)
             )
             writeToFile(key, content)
         } else {
@@ -621,7 +668,7 @@ override fun fromPersistString(string: String, fileName: String) {
                 // Deletion tombstone - write null + negative timestamp instead of deleting
                 val content = oktopoiJson.encodeToString(
                     PersistedValueWithSync.serializer(persisted.valueTypeSerializer),
-                    PersistedValueWithSync(null, syncTimestamp)
+                    PersistedValueWithSync(null, syncTimestamp, lastSyncedValue)
                 )
                 writeToFile(key, content)
             } else {
@@ -637,7 +684,20 @@ override fun fromPersistString(string: String, fileName: String) {
     
     override fun onBeforePutUnsafe(key: KeyType, newValue: ValueType) {
         if (syncInterval != Duration.INFINITE && inboundSuppressionDepth == 0 && persistenceLoadDepth == 0) {
-            unsyncedKeysMap[key] = Clock.System.now().toEpochMilliseconds()
+            val ts = Clock.System.now().toEpochMilliseconds()
+            val existing = unsyncedKeysMap[key]
+            unsyncedKeysMap[key] = if (existing == null) {
+                // First edit while synced — snapshot current value as rollback target.
+                // getUnsafe returns null when the key didn't exist before (locally created entry):
+                // no prior synced state → null lastSyncedValue → archive-and-remove on failure.
+                // Must run BEFORE super, which uses persistence-first and reads unsyncedKeysMap
+                // inside Esps.persistEntry.
+                UnsyncedEntry(ts, getUnsafe(key))
+            } else {
+                // Already pending — preserve the original lastSyncedValue (first-edit-wins),
+                // just refresh the timestamp.
+                existing.copy(timestamp = ts)
+            }
             if (syncInterval == Duration.ZERO) syncTrigger.tryEmit(Unit)
         }
         super.onBeforePutUnsafe(key, newValue)
@@ -645,7 +705,12 @@ override fun fromPersistString(string: String, fileName: String) {
 
     override fun onBeforeRemoveUnsafe(key: KeyType) {
         if (syncInterval != Duration.INFINITE && inboundSuppressionDepth == 0 && persistenceLoadDepth == 0) {
-            unsyncedKeysMap[key] = -Clock.System.now().toEpochMilliseconds()
+            val ts = -Clock.System.now().toEpochMilliseconds()
+            val existing = unsyncedKeysMap[key]
+            // First-edit-wins: if there's already a pending edit, keep its lastSyncedValue;
+            // otherwise capture the current value (which is the last synced state).
+            val lastSyncedValue = existing?.lastSyncedValue ?: getUnsafe(key)
+            unsyncedKeysMap[key] = UnsyncedEntry(ts, lastSyncedValue)
             if (syncInterval == Duration.ZERO) syncTrigger.tryEmit(Unit)
         }
         super.onBeforeRemoveUnsafe(key)
@@ -653,9 +718,15 @@ override fun fromPersistString(string: String, fileName: String) {
 
     override fun onBeforeClearUnsafe() {
         if (syncInterval != Duration.INFINITE) {
-            // Mark all existing entries as deleted before clearing
+            // Mark all existing entries as deleted before clearing.
+            // Capture each value as lastSyncedValue so a non-retryable delete sync can roll back
+            // to the value the server still has.
+            val ts = -Clock.System.now().toEpochMilliseconds()
             keysUnsafe().forEach { key ->
-                unsyncedKeysMap[key] = -Clock.System.now().toEpochMilliseconds()
+                val oldValue = getUnsafe(key)
+                val existing = unsyncedKeysMap[key]
+                val lastSyncedValue = existing?.lastSyncedValue ?: oldValue
+                unsyncedKeysMap[key] = UnsyncedEntry(ts, lastSyncedValue)
             }
             if (syncInterval == Duration.ZERO) syncTrigger.tryEmit(Unit)
         }
