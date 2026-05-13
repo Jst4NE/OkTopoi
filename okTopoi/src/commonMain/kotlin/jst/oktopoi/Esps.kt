@@ -13,8 +13,12 @@ import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
@@ -153,6 +157,11 @@ open class Esps<KeyType : Any, ValueType : Any> : Eps<KeyType, ValueType> {
 
     private val unsyncedKeysMap: MutableMap<KeyType, UnsyncedEntry<ValueType>> = mutableMapOf() // Keys that need syncing (timestamp + last synced value for rollback)
     private val syncTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1) // Triggers sync flow
+
+    // Emits the key whose unsynced state changed in a way Es.changes does not cover
+    // (currently: outgoing-sync success removes the key from unsyncedKeysMap without
+    // touching the underlying TreeMap). Drives the reactive sync-state flows below.
+    private val unsyncedTick = MutableSharedFlow<KeyType>(extraBufferCapacity = 256)
 
     // Sync interval: ZERO = immediate, INFINITE = disabled, >0 = periodic fallback
     private var syncInterval: Duration = OkTopoiConstants.DEFAULT_SYNC_INTERVAL
@@ -422,6 +431,52 @@ override fun fromPersistString(string: String, fileName: String) {
     }
 
     /**
+     * Returns true if [key] has no pending outbound sync (local change confirmed by remote
+     * or never modified locally).
+     */
+    suspend fun isSynced(key: KeyType): Boolean = withReadLock {
+        !unsyncedKeysMap.containsKey(key)
+    }
+
+    /**
+     * Snapshot of keys with a pending outbound sync (both upserts and deletes).
+     * Built on demand; not maintained between calls.
+     */
+    suspend fun getUnsyncedKeys(): Set<KeyType> = withReadLock {
+        unsyncedKeysMap.keys.toSet()
+    }
+
+    /**
+     * Cold flow of pending-sync keys. Pulls a fresh snapshot via [getUnsyncedKeys] only when
+     * subscribed and only when the underlying state may have changed. Does no work when no
+     * collector is active.
+     *
+     * For a shared/replaying view, wrap with `.shareIn(scope, WhileSubscribed(), replay = 1)`.
+     */
+    val unsyncedKeys: Flow<Set<KeyType>> = merge(changes, unsyncedTick)
+        .map { getUnsyncedKeys() }
+        .onStart { emit(getUnsyncedKeys()) }
+        .distinctUntilChanged()
+
+    /**
+     * Cold flow of [isSynced] for a single key. Re-evaluates only on changes that could
+     * affect this key: its own Put/Removed, structural Cleared/Rebuild, or a sync-success
+     * tick for this key.
+     */
+    fun isSyncedFlow(key: KeyType): Flow<Boolean> = merge(
+        changes.filter { change ->
+            when (change) {
+                is TreeMap.MapChange.Put<*, *>     -> change.key == key
+                is TreeMap.MapChange.Removed<*, *> -> change.key == key
+                else                               -> true // Cleared / Rebuild
+            }
+        },
+        unsyncedTick.filter { it == key }
+    ).map { isSynced(key) }
+     .onStart { emit(isSynced(key)) }
+     .distinctUntilChanged()
+
+    /**
      * Sync an entry with dependency resolution.
      * Recursively syncs all foreign key dependencies before syncing this entry.
      *
@@ -486,6 +541,11 @@ override fun fromPersistString(string: String, fileName: String) {
                 // For upserts: this[key] still exists, so persistEntry will write syncTimestamp=0
                 // Use getUnsafe to avoid deadlock (we're already holding write lock)
                 persistEntry(key, value)
+            }
+            // Notify reactive sync-state flows: Es.changes does not fire here because the
+            // underlying TreeMap value is unchanged — only unsyncedKeysMap shrank.
+            if (!unsyncedTick.tryEmit(key)) {
+                log.w { "unsyncedTick overflow for $key on ${propertyName} — slow or stuck subscriber" }
             }
         } finally {
             // Always remove from syncingKeys and complete deferred (even on failure, so it can be retried later)
