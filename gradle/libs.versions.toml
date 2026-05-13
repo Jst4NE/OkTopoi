@@ -1,19 +1,19 @@
 [versions]
 
 atomicfu = "0.32.1"
-kotlin = "2.3.20"
-kotlinxCoroutinesCore = "1.10.2"
+kotlin = "2.3.21"
+kotlinxCoroutinesCore = "1.11.0"
 kotlinxIoCore = "0.9.0"
 kotlinxSerializationJson = "1.11.0"
 
 kermit = "2.1.0"
 
-compose-multiplatform = "1.10.3"
+compose-multiplatform = "1.11.0"
 
 agp = "9.1.1"
 android-minSdk = "24"
 android-compileSdk = "36"
-compose-runtime = "1.10.6"
+compose-runtime = "1.11.1"
 lifecycleRuntimeCompose = "2.10.0"
 
 
