@@ -9,10 +9,22 @@ import kotlinx.io.files.Path
 import kotlinx.io.readString
 import kotlinx.io.writeString
 import kotlinx.serialization.KSerializer
+import kotlinx.serialization.Serializable
+import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+
+/**
+ * On-disk header line for a compacted snapshot file ([Eps.SNAPSHOT_FILE]).
+ */
+@Serializable
+internal data class SnapshotHeader(
+    val version: Int = 1,
+    val createdAtMs: Long,
+    val entryCount: Int
+)
 
 /**
  * Persistent reactive collection that extends Es with automatic file-based persistence.
@@ -157,12 +169,26 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
                 this@Eps.dirPath = Path(rootDir, callingClassName, propertyName)
                 fileSystem.createDirectories(dirPath)
 
-                val existingFiles = fileSystem.list(dirPath).filter { (fileSystem.metadataOrNull(it)?.size ?: 0) != 0L }
-                
+                val allFiles = fileSystem.list(dirPath)
+                val snapshotPath = Path(dirPath, SNAPSHOT_FILE)
+                val hasSnapshot = allFiles.any { it.name == SNAPSHOT_FILE }
+
                 // Suppress persistence while loading existing entries
                 this@Eps.persistenceLoadDepth++
                 try {
-                    existingFiles.forEach { file ->
+                    // Phase 1: load compacted snapshot (one big sequential read)
+                    if (hasSnapshot) {
+                        loadSnapshot(snapshotPath, rootDir)
+                    }
+
+                    // Phase 2: apply diff — per-entry files written since last compaction
+                    // override snapshot entries (or add new ones)
+                    val entryFiles = allFiles.filter { f ->
+                        f.name != SNAPSHOT_FILE &&
+                        !f.name.endsWith(TOMBSTONE_SUFFIX) &&
+                        (fileSystem.metadataOrNull(f)?.size ?: 0) != 0L
+                    }
+                    entryFiles.forEach { file ->
                         try {
                             fileSystem.source(file)
                                 .buffered()
@@ -182,6 +208,38 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
                                 propertyIdentifier = "${callingClassName}.${propertyName}"
                             )
                             // Continue with next file
+                        }
+                    }
+
+                    // Phase 3: apply tombstones — deletions that happened after the snapshot
+                    val tombstoneFiles = allFiles.filter { it.name.endsWith(TOMBSTONE_SUFFIX) }
+                    tombstoneFiles.forEach { tomb ->
+                        try {
+                            val keyJson = tomb.name.removeSuffix(TOMBSTONE_SUFFIX)
+                            val key = oktopoiJson.decodeFromString(persisted.keyTypeSerializer, keyJson)
+                            removeUnsafe(key)
+                        } catch (e: Exception) {
+                            Logger.e(e, tag = "OkTopoi-Eps") {
+                                "Failed to apply tombstone ${tomb.name} in ${callingClassName}.${propertyName}: ${e.message}"
+                            }
+                        }
+                    }
+
+                    // Auto-compact when there's enough loose stuff to amortize the snapshot write.
+                    // We're still inside setup() — single-threaded, persistence suppressed — so we can
+                    // call compactUnsafe directly without taking the lock.
+                    val staleCount = entryFiles.size + tombstoneFiles.size
+                    if (staleCount >= AUTO_COMPACT_THRESHOLD) {
+                        try {
+                            log.d {
+                                "ESP[${callingClassName}.${propertyName}] auto-compacting at setup ($staleCount stale files ≥ $AUTO_COMPACT_THRESHOLD)"
+                            }
+                            compactUnsafe()
+                        } catch (e: Exception) {
+                            // Auto-compaction is an optimization — never fail setup because of it
+                            Logger.w(e, tag = "OkTopoi-Eps") {
+                                "Auto-compaction failed for ${callingClassName}.${propertyName}: ${e.message}. Continuing without snapshot."
+                            }
                         }
                     }
                 } finally {
@@ -208,13 +266,24 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
     protected fun deleteFromFile(key: KeyType) {
         val fileName = oktopoiJson.encodeToString(persisted.keyTypeSerializer, key)
         val filePath = Path(dirPath, fileName)
-        // Only attempt deletion if file exists - if already gone, deletion succeeded
         if (fileSystem.exists(filePath)) {
             fileSystem.delete(filePath)
         } else {
             log.d { "File already deleted: $filePath" }
         }
+        // If a snapshot exists, the deleted key may still be present in it.
+        // Drop a tombstone so the next load knows to remove it.
+        if (snapshotExists()) {
+            val tombPath = Path(dirPath, "$fileName$TOMBSTONE_SUFFIX")
+            try {
+                fileSystem.sink(tombPath).buffered().use { /* 0 bytes; existence is the signal */ }
+            } catch (e: Exception) {
+                log.w(e) { "Failed to write tombstone for $fileName" }
+            }
+        }
     }
+
+    protected fun snapshotExists(): Boolean = fileSystem.exists(Path(dirPath, SNAPSHOT_FILE))
 
     // Persistence logic - can be overridden by subclasses
     protected open fun persistEntry(key: KeyType, value: ValueType?) {
@@ -274,6 +343,156 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
         )
         // Use unsafe put during initialization to avoid locking overhead; hooks are suppressed by persistenceLoadDepth
         putUnsafe(key, value)
+    }
+
+    // ========================================================================
+    // Snapshot / compaction
+    // ========================================================================
+
+    /**
+     * Read a previously-written snapshot file and replay its entries via [fromPersistString].
+     * Per-line format: `<serializedKey>\t<entryContent>`. Header is the first line.
+     * Single-entry decode failures are logged; a corrupt whole-snapshot file is archived
+     * and load falls through to the per-entry scan.
+     */
+    private fun loadSnapshot(snapshotPath: Path, rootDir: Path) {
+        try {
+            val content = fileSystem.source(snapshotPath).buffered().use { it.readString() }
+            val lines = content.split('\n')
+            if (lines.isEmpty() || lines[0].isEmpty()) return
+            // First line: header — decoded for diagnostics; structural validation happens implicitly
+            oktopoiJson.decodeFromString(SnapshotHeader.serializer(), lines[0])
+            for (i in 1 until lines.size) {
+                val line = lines[i]
+                if (line.isEmpty()) continue
+                val tabIdx = line.indexOf('\t')
+                if (tabIdx < 0) continue
+                val fileName = line.substring(0, tabIdx)
+                val entryContent = line.substring(tabIdx + 1)
+                try {
+                    fromPersistString(entryContent, fileName)
+                } catch (e: Exception) {
+                    Logger.e(e, tag = "OkTopoi-Eps") {
+                        "Failed to deserialize snapshot entry $fileName in ${callingClassName}.${propertyName}: ${e.message}. Skipping."
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Logger.e(e, tag = "OkTopoi-Eps") {
+                "Snapshot corrupted in ${callingClassName}.${propertyName}: ${e.message}. Archiving and falling back to per-entry scan."
+            }
+            try {
+                archiveCorruptedFile(
+                    filePath = snapshotPath,
+                    fileSystem = fileSystem,
+                    rootDir = rootDir,
+                    propertyIdentifier = "${callingClassName}.${propertyName}.snapshot"
+                )
+            } catch (_: Exception) { /* archive best-effort */ }
+        }
+    }
+
+    /**
+     * Yield the full set of entries that must be captured in the next snapshot.
+     * Each pair is (fileName, content) — same wire format as a per-entry file.
+     * Subclasses (Esps) override to include entries that exist as on-disk persistence
+     * state but aren't present in the in-memory TreeMap (e.g. pending-delete tombstones).
+     * Caller holds the write lock.
+     */
+    protected open fun collectSnapshotEntriesUnsafe(): List<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>(sizeUnsafe)
+        keysUnsafe().forEach { key ->
+            val value = getUnsafe(key) ?: return@forEach
+            val fileName = oktopoiJson.encodeToString(persisted.keyTypeSerializer, key)
+            val content = serializeEntryForSnapshot(key, value)
+            out.add(fileName to content)
+        }
+        return out
+    }
+
+    /**
+     * Serialize a single live entry for inclusion in a snapshot.
+     * Default emits the value JSON (matching [writeToFile]). Esps overrides to wrap with sync metadata.
+     */
+    protected open fun serializeEntryForSnapshot(key: KeyType, value: ValueType): String =
+        oktopoiJson.encodeToString(persisted.valueTypeSerializer, value)
+
+    /**
+     * Compact all per-entry files (and tombstones) into a single snapshot file.
+     *
+     * Workflow:
+     *  1. Write a tmp snapshot containing every current entry.
+     *  2. Atomically swap tmp → `_snapshot.bin`.
+     *  3. Delete all remaining per-entry files and tombstones in the directory.
+     *
+     * After this, the next load opens **one** file instead of N. Crash-safe: if the process dies
+     * between steps 2 and 3, the leftover per-entry files simply override snapshot entries on load,
+     * which yields the same in-memory state.
+     *
+     * Call this at app shutdown, during quiet periods, or after large bulk writes. Cheap-ish for
+     * tens of thousands of entries (one sequential write) but holds the write lock for its duration.
+     */
+    @OptIn(ExperimentalTime::class)
+    suspend fun compact() {
+        withWriteLock { compactUnsafe() }
+    }
+
+    @OptIn(ExperimentalTime::class)
+    protected open fun compactUnsafe() {
+        if (!this::dirPath.isInitialized || !this::fileSystem.isInitialized) {
+            log.w { "compact() called before setup() — ignoring" }
+            return
+        }
+        val snapshotPath = Path(dirPath, SNAPSHOT_FILE)
+        val tmpPath = Path(dirPath, "$SNAPSHOT_FILE$SNAPSHOT_TMP_SUFFIX")
+
+        val entries = collectSnapshotEntriesUnsafe()
+        val header = SnapshotHeader(
+            createdAtMs = Clock.System.now().toEpochMilliseconds(),
+            entryCount = entries.size
+        )
+
+        // 1. Write tmp file
+        if (fileSystem.exists(tmpPath)) fileSystem.delete(tmpPath)
+        fileSystem.sink(tmpPath).buffered().use { sink ->
+            sink.writeString(oktopoiJson.encodeToString(SnapshotHeader.serializer(), header))
+            sink.writeString("\n")
+            entries.forEach { (fileName, content) ->
+                sink.writeString(fileName)
+                sink.writeString("\t")
+                sink.writeString(content)
+                sink.writeString("\n")
+            }
+        }
+
+        // 2. Atomic swap
+        if (fileSystem.exists(snapshotPath)) fileSystem.delete(snapshotPath)
+        fileSystem.atomicMove(tmpPath, snapshotPath)
+
+        // 3. Sweep stale per-entry files and tombstones
+        fileSystem.list(dirPath).forEach { f ->
+            if (f.name != SNAPSHOT_FILE) {
+                try { fileSystem.delete(f) } catch (e: Exception) {
+                    log.w(e) { "compact: failed to delete ${f.name}" }
+                }
+            }
+        }
+
+        log.d { "ESP[${callingClassName}.${propertyName}] compacted ${entries.size} entries into snapshot" }
+    }
+
+    companion object {
+        internal const val SNAPSHOT_FILE = "_snapshot.bin"
+        internal const val SNAPSHOT_TMP_SUFFIX = ".tmp"
+        internal const val TOMBSTONE_SUFFIX = ".tomb"
+
+        /**
+         * If a setup() load encounters at least this many per-entry files + tombstones, it folds
+         * them into a fresh snapshot before returning. Picked for write-rarely-but-grow-large
+         * workloads: large enough that tiny collections never pay the snapshot-write cost,
+         * small enough that load time on slow filesystems can't drift far from snapshot speed.
+         */
+        internal const val AUTO_COMPACT_THRESHOLD = 300
     }
 }
 

@@ -776,6 +776,47 @@ override fun fromPersistString(string: String, fileName: String) {
         super.onBeforeRemoveUnsafe(key)
     }
 
+    // ========================================================================
+    // Snapshot integration — preserve sync metadata + include pending-delete entries
+    // ========================================================================
+
+    override fun serializeEntryForSnapshot(key: KeyType, value: ValueType): String {
+        val unsynced = unsyncedKeysMap[key]
+        return oktopoiJson.encodeToString(
+            PersistedValueWithSync.serializer(persisted.valueTypeSerializer),
+            PersistedValueWithSync(value, unsynced?.timestamp ?: 0L, unsynced?.lastSyncedValue)
+        )
+    }
+
+    override fun collectSnapshotEntriesUnsafe(): List<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>(sizeUnsafe + unsyncedKeysMap.size)
+        val seen = HashSet<KeyType>(sizeUnsafe)
+        // Live entries (may also be unsynced)
+        keysUnsafe().forEach { key ->
+            val value = getUnsafe(key) ?: return@forEach
+            seen.add(key)
+            out.add(
+                oktopoiJson.encodeToString(persisted.keyTypeSerializer, key) to
+                    serializeEntryForSnapshot(key, value)
+            )
+        }
+        // Pending-delete entries live only in unsyncedKeysMap with timestamp < 0 — their persisted
+        // file is a "deletion tombstone" (value=null, negative timestamp). Must be in the snapshot
+        // so a remote-resync replay survives restart.
+        unsyncedKeysMap.forEach { (key, entry) ->
+            if (key in seen) return@forEach
+            if (entry.timestamp >= 0) return@forEach  // upsert with no live value: skip
+            val content = oktopoiJson.encodeToString(
+                PersistedValueWithSync.serializer(persisted.valueTypeSerializer),
+                PersistedValueWithSync(null, entry.timestamp, entry.lastSyncedValue)
+            )
+            out.add(
+                oktopoiJson.encodeToString(persisted.keyTypeSerializer, key) to content
+            )
+        }
+        return out
+    }
+
     override fun onBeforeClearUnsafe() {
         if (syncInterval != Duration.INFINITE) {
             // Mark all existing entries as deleted before clearing.
