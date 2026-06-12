@@ -48,6 +48,7 @@ import org.jetbrains.kotlin.ir.types.typeWith
 import org.jetbrains.kotlin.ir.util.functions
 import org.jetbrains.kotlin.ir.util.hasAnnotation
 import org.jetbrains.kotlin.ir.util.kotlinFqName
+import org.jetbrains.kotlin.ir.visitors.IrElementTransformerVoid
 import org.jetbrains.kotlin.ir.visitors.IrVisitorVoid
 import org.jetbrains.kotlin.ir.visitors.acceptChildrenVoid
 import org.jetbrains.kotlin.ir.visitors.acceptVoid
@@ -79,6 +80,30 @@ import org.jetbrains.kotlin.name.Name
  * Fail-fast: if any required Compose Runtime symbol is missing (API drift across Compose
  * versions), the plugin errors out the build with a clear diagnostic. Silent fallback is
  * intentionally NOT provided — a broken compile-time contract must surface loudly.
+ *
+ * ## Composition-time code nested inside arguments (hoisting)
+ *
+ * The wrap moves the argument into a calculation lambda that only runs on cache miss. That is
+ * unsound when the argument *contains* code that must execute in normal composition flow every
+ * time, because slot consumption would differ between the miss and hit paths and the slot
+ * cursor misaligns on recomposition (observed in the wild as
+ * `ClassCastException: ...$$Lambda cannot be cast to java.util.Comparator` when the previous
+ * slot's lambda was read back where the comparator was cached). Two sources of such code:
+ *
+ *  - **Post-Compose:** Compose's lambda memoization has already lowered nested lambda
+ *    expressions into `$composer`-touching cache sequences — e.g. the selector lambdas of the
+ *    non-inline `compareBy({ a }, { b })` inside an `entryComparator` argument.
+ *  - **Pre-Compose:** nested lambda expressions (except those passed to inlinable parameters
+ *    of inline functions) and nested `@Composable` calls will be lowered into exactly that
+ *    shape after Compose runs over the plugin's `remember { arg }` output.
+ *
+ * Such nested units are **hoisted**: each becomes a temporary evaluated unconditionally before
+ * the wrap, the argument is rewritten to reference the temporaries, and the temporaries then
+ * participate as cache keys of the outer wrap (already-lowered composer blocks and composable
+ * calls self-cache and are evaluated as-is; raw lambdas get their own keyed `remember`).
+ * Arguments that are themselves composition-bound at the top level (composable calls, direct
+ * `$composer` use) are passed through untouched. If a nested unit captures a local declared
+ * inside the same argument expression it cannot be hoisted — the build fails with guidance.
  */
 class ComposeCallSiteRememberWrapper(
     private val pluginContext: IrPluginContext,
@@ -197,31 +222,68 @@ class ComposeCallSiteRememberWrapper(
                 continue
             }
 
-            // If the arg is already a memoized form, skip. Wrapping a Compose-lowered
-            // cache block inside another calculation lambda corrupts the slot table:
-            // the inner `$composer.startReplaceGroup` / `cache` / `endReplaceGroup` would
-            // execute from a deferred context instead of the normal composition flow.
-            //
-            // Two shapes qualify as "already memoized":
-            //  - IrBlock     — Compose has lowered a `remember(...)` into its cache-block form.
-            //  - IrCall to `androidx.compose.runtime.remember` — pre-Compose user-written memoization.
-            if (isAlreadyMemoized(arg)) continue
-
-            val captures = collectCaptures(arg)
-            transformed.arguments[idx] = if (composerParam != null) {
-                buildCacheBlock(
-                    enclosing = enclosing,
-                    composerParam = composerParam,
-                    arg = arg,
-                    captures = captures,
-                    symbols = composerSymbols,
-                    callSiteStartOffset = transformed.startOffset,
-                )
-            } else {
-                buildRememberCall(enclosing, arg, captures)
-            }
+            transformed.arguments[idx] = wrapArgument(
+                enclosing = enclosing,
+                composerParam = composerParam,
+                arg = arg,
+                callSiteStartOffset = transformed.startOffset,
+            )
         }
         return transformed
+    }
+
+    /**
+     * Memoizes a single argument expression, hoisting any nested composition-time units first
+     * (see the class doc). Returns the argument unchanged when it is already memoized or is
+     * itself composition-bound at the top level.
+     */
+    private fun wrapArgument(
+        enclosing: IrSimpleFunction,
+        composerParam: IrValueParameter?,
+        arg: IrExpression,
+        callSiteStartOffset: Int,
+    ): IrExpression {
+        // If the arg is already a memoized form, skip. Wrapping a Compose-lowered
+        // cache block inside another calculation lambda corrupts the slot table:
+        // the inner `$composer.startReplaceGroup` / `cache` / `endReplaceGroup` would
+        // execute from a deferred context instead of the normal composition flow.
+        //
+        // Two shapes qualify as "already memoized":
+        //  - IrBlock     — Compose has lowered a `remember(...)` into its cache-block form.
+        //  - IrCall to `androidx.compose.runtime.remember` — pre-Compose user-written memoization.
+        if (isAlreadyMemoized(arg)) return arg
+
+        // Pre-Compose: a composable call as the whole argument manages its own slots and must
+        // stay in normal composition flow — never defer it into a calculation lambda.
+        if (composerParam == null && arg is IrCall &&
+            arg.symbol.owner.hasAnnotation(composableFqName)
+        ) return arg
+
+        val hoistables = collectHoistables(arg, composerParam)
+
+        // A bare `$composer` read can only surface as a hoist candidate when the argument
+        // itself is composition-bound at the top level (e.g. a lowered composable call taking
+        // `$composer` directly) — leave such arguments untouched.
+        if (hoistables.any { it.expr is IrGetValue }) return arg
+
+        if (hoistables.isNotEmpty()) {
+            validateHoistScopes(enclosing, arg, hoistables)
+            return buildHoistedWrap(enclosing, composerParam, arg, hoistables, callSiteStartOffset)
+        }
+
+        val captures = collectCaptures(arg)
+        return if (composerParam != null) {
+            buildCacheBlock(
+                enclosing = enclosing,
+                composerParam = composerParam,
+                arg = arg,
+                captures = captures,
+                symbols = composerSymbols,
+                callSiteStartOffset = callSiteStartOffset,
+            )
+        } else {
+            buildRememberCall(enclosing, arg, captures)
+        }
     }
 
     /**
@@ -242,25 +304,12 @@ class ComposeCallSiteRememberWrapper(
         val rewritten = vararg.elements.map { element: IrVarargElement ->
             when (element) {
                 is IrSpreadElement -> element
-                is IrExpression -> {
-                    if (isAlreadyMemoized(element)) {
-                        element
-                    } else {
-                        val captures = collectCaptures(element)
-                        if (composerParam != null) {
-                            buildCacheBlock(
-                                enclosing = enclosing,
-                                composerParam = composerParam,
-                                arg = element,
-                                captures = captures,
-                                symbols = composerSymbols,
-                                callSiteStartOffset = element.startOffset,
-                            )
-                        } else {
-                            buildRememberCall(enclosing, element, captures)
-                        }
-                    }
-                }
+                is IrExpression -> wrapArgument(
+                    enclosing = enclosing,
+                    composerParam = composerParam,
+                    arg = element,
+                    callSiteStartOffset = element.startOffset,
+                )
                 else -> element
             }
         }
@@ -280,6 +329,216 @@ class ComposeCallSiteRememberWrapper(
             if (fq == "androidx.compose.runtime.remember") return true
         }
         return false
+    }
+
+    /**
+     * A nested composition-time unit found inside a wrapped argument.
+     *
+     * [selfCaching] units (Compose-lowered `$composer`-touching subtrees, pre-Compose
+     * composable calls) already manage their own slot caching — they are hoisted into a plain
+     * temporary and evaluated as-is. Non-self-caching units (raw lambda allocations Compose
+     * would memoize after us) get their own keyed `remember` around the temporary initializer
+     * so their identity stays stable across recompositions.
+     */
+    private data class Hoistable(
+        val expr: IrExpression,
+        val selfCaching: Boolean,
+    )
+
+    /** True when any `IrGetValue` in [element]'s subtree targets [decl]. */
+    private fun referencesValue(element: IrElement, decl: IrValueDeclaration): Boolean {
+        var found = false
+        element.acceptVoid(object : IrVisitorVoid() {
+            override fun visitElement(element: IrElement) {
+                if (!found) element.acceptChildrenVoid(this)
+            }
+
+            override fun visitGetValue(expression: IrGetValue) {
+                if (expression.symbol.owner == decl) found = true
+            }
+        })
+        return found
+    }
+
+    /**
+     * Finds the maximal nested composition-time units inside [arg] (excluding [arg] itself):
+     *
+     *  - **Post-Compose** ([composerParam] non-null): any subtree that reads `$composer` —
+     *    Compose-lowered memoization blocks, composable calls, etc. Maximal: once a subtree is
+     *    selected, its children are not inspected.
+     *  - **Pre-Compose**: calls to `@Composable` functions (they will lower to composer slot
+     *    traffic), and lambda expressions not passed to an inlinable parameter of an inline
+     *    function (Compose will memoize exactly those after the plugin runs).
+     *
+     * Lambda bodies are never descended into: allocations there happen at invoke time, not
+     * composition time, and must not be hoisted out of their scope.
+     */
+    private fun collectHoistables(
+        arg: IrExpression,
+        composerParam: IrValueParameter?,
+    ): List<Hoistable> {
+        val result = mutableListOf<Hoistable>()
+        val exemptInlineArgs = mutableSetOf<IrFunctionExpression>()
+
+        arg.acceptVoid(object : IrVisitorVoid() {
+            override fun visitElement(element: IrElement) {
+                element.acceptChildrenVoid(this)
+            }
+
+            override fun visitExpression(expression: IrExpression) {
+                if (expression !== arg && composerParam != null &&
+                    referencesValue(expression, composerParam)
+                ) {
+                    result += Hoistable(expression, selfCaching = true)
+                    return
+                }
+                super.visitExpression(expression)
+            }
+
+            override fun visitVararg(expression: IrVararg) {
+                // A vararg construction allocates a fresh array each evaluation — hoisting
+                // it whole would make the outer cache key identity-unstable (invalidating
+                // the cache every recomposition). Stay transparent; the individual elements
+                // are considered instead.
+                expression.acceptChildrenVoid(this)
+            }
+
+            override fun visitCall(expression: IrCall) {
+                if (expression !== arg && composerParam == null &&
+                    expression.symbol.owner.hasAnnotation(composableFqName)
+                ) {
+                    result += Hoistable(expression, selfCaching = true)
+                    return
+                }
+                val callee = expression.symbol.owner
+                if (callee.isInline) {
+                    for (p in callee.parameters) {
+                        if (p.kind != IrParameterKind.Regular || p.isNoinline) continue
+                        (expression.arguments.getOrNull(p.indexInParameters) as? IrFunctionExpression)
+                            ?.let { exemptInlineArgs += it }
+                    }
+                }
+                super.visitCall(expression)
+            }
+
+            override fun visitFunctionExpression(expression: IrFunctionExpression) {
+                if (expression !== arg && composerParam == null &&
+                    expression !in exemptInlineArgs
+                ) {
+                    result += Hoistable(expression, selfCaching = false)
+                }
+                // Never descend into lambda bodies (invoke-time code).
+            }
+        })
+        return result
+    }
+
+    /** All value declarations (variables, function/lambda parameters) within [element]. */
+    private fun collectValueDeclarations(element: IrElement): Set<IrValueDeclaration> {
+        val decls = mutableSetOf<IrValueDeclaration>()
+        element.acceptVoid(object : IrVisitorVoid() {
+            override fun visitElement(element: IrElement) {
+                element.acceptChildrenVoid(this)
+            }
+
+            override fun visitFunction(declaration: IrFunction) {
+                declaration.parameters.forEach { decls += it }
+                super.visitFunction(declaration)
+            }
+
+            override fun visitVariable(declaration: IrVariable) {
+                decls += declaration
+                super.visitVariable(declaration)
+            }
+        })
+        return decls
+    }
+
+    /**
+     * A hoistable that captures a value declared inside the same argument expression (but
+     * outside itself) cannot be moved above the argument — fail the build with guidance
+     * instead of silently emitting slot-corrupting code.
+     */
+    private fun validateHoistScopes(
+        enclosing: IrSimpleFunction,
+        arg: IrExpression,
+        hoistables: List<Hoistable>,
+    ) {
+        val declsInArg = collectValueDeclarations(arg)
+        for (h in hoistables) {
+            val broken = collectCaptures(h.expr).firstOrNull { it.decl in declsInArg }
+            if (broken != null) {
+                failHard(
+                    "@WrapInRemember argument in ${enclosing.kotlinFqName} contains " +
+                        "composition-time code capturing a local ('${broken.decl.name}') " +
+                        "declared inside the same argument expression — it cannot be hoisted. " +
+                        "Wrap the argument in remember(...) manually.",
+                )
+            }
+        }
+    }
+
+    /**
+     * Emits:
+     *   { val t1 = <hoistable 1>; val t2 = ...; <wrap of arg with hoistables replaced by t_i> }
+     *
+     * Self-caching hoistables are evaluated as-is (unconditionally, preserving their slot
+     * traffic every composition); raw lambdas are wrapped in their own keyed `remember`. The
+     * temporaries are picked up by [collectCaptures] on the rewritten argument and become
+     * cache keys of the outer wrap.
+     */
+    private fun buildHoistedWrap(
+        enclosing: IrSimpleFunction,
+        composerParam: IrValueParameter?,
+        arg: IrExpression,
+        hoistables: List<Hoistable>,
+        callSiteStartOffset: Int,
+    ): IrExpression {
+        val builder = DeclarationIrBuilder(pluginContext, enclosing.symbol)
+        return builder.irBlock(resultType = arg.type) {
+            val replacements = HashMap<IrExpression, IrValueDeclaration>()
+            for (h in hoistables) {
+                val initializer = if (h.selfCaching) h.expr
+                else buildRememberCall(enclosing, h.expr, collectCaptures(h.expr))
+                replacements[h.expr] = irTemporary(initializer, nameHint = "oktopoiHoisted")
+            }
+
+            val rewritten = arg.transform(object : IrElementTransformerVoid() {
+                override fun visitExpression(expression: IrExpression): IrExpression {
+                    replacements[expression]?.let { return irGet(it) }
+                    return super.visitExpression(expression)
+                }
+
+                override fun visitFunctionExpression(expression: IrFunctionExpression): IrExpression {
+                    replacements[expression]?.let { return irGet(it) }
+                    return expression // don't rewrite inside lambda bodies
+                }
+            }, null) as IrExpression
+
+            // Safety net: every composer-touching subtree must have been hoisted, otherwise
+            // deferring the rest would still corrupt the slot table.
+            if (composerParam != null && referencesValue(rewritten, composerParam)) {
+                failHard(
+                    "@WrapInRemember argument in ${enclosing.kotlinFqName} still references " +
+                        "\$composer after hoisting — unsupported shape. Wrap the argument in " +
+                        "remember(...) manually.",
+                )
+            }
+
+            val captures = collectCaptures(rewritten)
+            +(if (composerParam != null) {
+                buildCacheBlock(
+                    enclosing = enclosing,
+                    composerParam = composerParam,
+                    arg = rewritten,
+                    captures = captures,
+                    symbols = composerSymbols,
+                    callSiteStartOffset = callSiteStartOffset,
+                )
+            } else {
+                buildRememberCall(enclosing, rewritten, captures)
+            })
+        }
     }
 
     /**
