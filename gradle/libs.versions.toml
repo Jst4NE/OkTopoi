@@ -1,19 +1,18 @@
 [versions]
 
-atomicfu = "0.32.1"
-kotlin = "2.3.21"
+atomicfu = "0.33.0"
+kotlin = "2.4.0"
 kotlinxCoroutinesCore = "1.11.0"
 kotlinxIoCore = "0.9.0"
 kotlinxSerializationJson = "1.11.0"
 
 kermit = "2.1.0"
 
-compose-multiplatform = "1.11.0"
+compose-multiplatform = "1.11.1"
 
 agp = "9.1.1"
 android-minSdk = "24"
 android-compileSdk = "36"
-compose-runtime = "1.11.1"
 lifecycleRuntimeCompose = "2.10.0"
 
 
@@ -28,7 +27,7 @@ kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-c
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutinesCore" }
 kotlinx-io-core = { module = "org.jetbrains.kotlinx:kotlinx-io-core", version.ref = "kotlinxIoCore" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerializationJson" }
-compose-runtime = { module = "androidx.compose.runtime:runtime", version.ref = "compose-runtime" }
+compose-runtime = { module = "androidx.compose.runtime:runtime", version.ref = "compose-multiplatform" }
 lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycleRuntimeCompose" }
 
 
