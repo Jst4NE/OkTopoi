@@ -1123,8 +1123,16 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             mutableStateListOf<Map.Entry<KeyType, T>>()
         }
 
+        // Serializes resultList mutations across the two LaunchedEffects below
+        // (primary-collection changes and dependency changes). Both call suspend
+        // helpers whose filterMap suspends at every fetch(); on the UI dispatcher
+        // those suspension points let a reEvaluateEntry() interleave with a
+        // rebuild() — which clears the list up front and re-adds at the end —
+        // producing a transient duplicate key that crashes LazyColumn/LazyRow.
+        val mutationMutex = remember(entryComparator, filterMap) { Mutex() }
+
         // Helper: rebuild entire list from current state
-        suspend fun rebuild() {
+        suspend fun rebuild() = mutationMutex.withLock {
             resultList.clear()
             dependencyTracker.clear()
 
@@ -1149,8 +1157,8 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         }
 
         // Helper: re-evaluate a specific primary entry
-        suspend fun reEvaluateEntry(primaryKey: KeyType) {
-            val primaryValue = get(primaryKey) ?: return
+        suspend fun reEvaluateEntry(primaryKey: KeyType) = mutationMutex.withLock {
+            val primaryValue = get(primaryKey) ?: return@withLock
             val entry = MapEntry(primaryKey, primaryValue)
 
             val context = JoinContext()
@@ -1192,14 +1200,14 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                             reEvaluateEntry(change.key)
                         }
 
-                        is Removed -> {
+                        is Removed -> mutationMutex.withLock {
                             // Primary entry removed → remove from results and dependencies
                             val index = resultList.indexOfFirst { it.key == change.key }
                             if (index >= 0) resultList.removeAt(index)
                             dependencyTracker.removePrimaryEntry(change.key)
                         }
 
-                        is Cleared -> {
+                        is Cleared -> mutationMutex.withLock {
                             resultList.clear()
                             dependencyTracker.clear()
                         }
@@ -1378,6 +1386,13 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             mutableMapOf<KeyType, SK>()
         }
 
+        // Serializes resultMap/primaryToGroup mutations across the two LaunchedEffects
+        // below. As in asSnapshotStateListWithJoins, rebuild() clears everything up
+        // front and refills at the end while filterMap suspends at every fetch(); an
+        // interleaved reEvaluateEntry() would otherwise re-add an entry that rebuild
+        // then adds again, producing a transient duplicate key that crashes LazyColumn/Row.
+        val mutationMutex = remember(groupByKey, entryComparator, filterMap) { Mutex() }
+
         // Helper: get or create list for a group
         fun getOrCreateList(groupKey: SK): SnapshotStateList<Map.Entry<KeyType, T>> {
             return resultMap.getOrPut(groupKey) { mutableStateListOf() }
@@ -1389,7 +1404,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         }
 
         // Helper: rebuild entire map from current state
-        suspend fun rebuild() {
+        suspend fun rebuild() = mutationMutex.withLock {
             resultMap.clear()
             dependencyTracker.clear()
             primaryToGroup.clear()
@@ -1421,8 +1436,8 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         }
 
         // Helper: re-evaluate a specific primary entry
-        suspend fun reEvaluateEntry(primaryKey: KeyType) {
-            val primaryValue = get(primaryKey) ?: return
+        suspend fun reEvaluateEntry(primaryKey: KeyType) = mutationMutex.withLock {
+            val primaryValue = get(primaryKey) ?: return@withLock
             val entry = MapEntry(primaryKey, primaryValue)
 
             val context = JoinContext()
@@ -1498,7 +1513,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                             reEvaluateEntry(change.key)
                         }
 
-                        is Removed -> {
+                        is Removed -> mutationMutex.withLock {
                             // Primary entry removed → remove from group and dependencies
                             val groupKey = primaryToGroup[change.key]
                             if (groupKey != null) {
@@ -1512,7 +1527,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                             dependencyTracker.removePrimaryEntry(change.key)
                         }
 
-                        is Cleared -> {
+                        is Cleared -> mutationMutex.withLock {
                             resultMap.clear()
                             dependencyTracker.clear()
                             primaryToGroup.clear()
