@@ -860,14 +860,20 @@ open class UnsafeTreeMapCore<K, V> internal constructor(
         
         override fun remove() {
             val toRemove = lastReturned ?: throw IllegalStateException("next() must be called before remove()")
-            
-            // If next would be removed, advance it
+
+            // If next would be removed, advance it (compute the successor while the node
+            // is still linked into the tree).
             if (next == toRemove) {
                 next = toRemove.successor()
             }
-            
-            deleteNode(toRemove)
-            _size--
+
+            // Route through removeUnsafe rather than deleting the node directly so that
+            // subclass hooks run: secondary-index maintenance (TreeMap), change emission
+            // (Es), and sync-deletion tracking (Esps). Calling deleteNode() here bypassed
+            // all of them, leaving orphaned secondary-index entries that later crash
+            // forEachBy/getBy with an NPE on getUnsafe(staleKey)!!. removeUnsafe handles
+            // the node deletion and size decrement itself.
+            removeUnsafe(toRemove.key)
             lastReturned = null
         }
         
