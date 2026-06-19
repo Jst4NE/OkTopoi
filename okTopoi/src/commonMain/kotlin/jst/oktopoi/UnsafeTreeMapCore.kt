@@ -281,84 +281,97 @@ open class UnsafeTreeMapCore<K, V> internal constructor(
         v?.parent = u.parent
     }
     
+    /** Null-safe color accessor: an absent (null) leaf counts as black, per RB convention. */
+    private fun colorOf(n: Node<K, V>?): Color = n?.color ?: Color.BLACK
+
     /**
-     * Fixes red-black tree violations after deletion.
-     * Maintains all red-black tree invariants.
+     * Fixes red-black tree violations after deletion, restoring all invariants.
+     *
+     * [x] is the node that moved into the deleted (black) node's place, carrying one extra
+     * "black" to be pushed back up the tree. It may be null when that place is now an absent
+     * (nil) leaf; since a null node has no parent pointer of its own, the parent of x's
+     * position is passed explicitly as [xParent].
+     *
+     * The extra black is resolved by the standard four cases against x's sibling, rebalancing
+     * upward until it reaches a red node or the root. At loop entry the sibling is guaranteed
+     * to exist by the red-black invariants, so `node == p.left` identifies x's side correctly
+     * even when x itself is null. After the first iteration `node` is always a real node.
      */
-    private fun deleteFixup(node: Node<K, V>?) {
-        var x = node
-        
-        while (x != root && x?.color == Color.BLACK) {
-            val parent = x.parent ?: return
-            
-            if (x == parent.left) {
-                // x is left child
-                var w = parent.right!!  // Sibling must exist due to RB properties
-                
-                if (w.color == Color.RED) {
+    private fun deleteFixup(x: Node<K, V>?, xParent: Node<K, V>?) {
+        var node = x
+        var parent = xParent
+
+        while (node != root && colorOf(node) == Color.BLACK) {
+            val p = parent ?: break  // defensive: only null when node is the root
+
+            if (node == p.left) {
+                // node is the left child
+                var w = p.right
+                if (colorOf(w) == Color.RED) {
                     // Case 1: Sibling is red
-                    w.color = Color.BLACK
-                    parent.color = Color.RED
-                    rotateLeft(parent)
-                    w = parent.right!!
+                    w?.color = Color.BLACK
+                    p.color = Color.RED
+                    rotateLeft(p)
+                    w = p.right
                 }
-                
-                if ((w.left?.color ?: Color.BLACK) == Color.BLACK && 
-                    (w.right?.color ?: Color.BLACK) == Color.BLACK) {
+
+                if (colorOf(w?.left) == Color.BLACK && colorOf(w?.right) == Color.BLACK) {
                     // Case 2: Both of sibling's children are black
-                    w.color = Color.RED
-                    x = parent
+                    w?.color = Color.RED
+                    node = p
+                    parent = p.parent
                 } else {
-                    if ((w.right?.color ?: Color.BLACK) == Color.BLACK) {
+                    if (colorOf(w?.right) == Color.BLACK) {
                         // Case 3: Sibling's right child is black, left is red
-                        w.left?.color = Color.BLACK
-                        w.color = Color.RED
-                        rotateRight(w)
-                        w = parent.right!!
+                        w?.left?.color = Color.BLACK
+                        w?.color = Color.RED
+                        w?.let { rotateRight(it) }
+                        w = p.right
                     }
                     // Case 4: Sibling's right child is red
-                    w.color = parent.color
-                    parent.color = Color.BLACK
-                    w.right?.color = Color.BLACK
-                    rotateLeft(parent)
-                    x = root
+                    w?.color = p.color
+                    p.color = Color.BLACK
+                    w?.right?.color = Color.BLACK
+                    rotateLeft(p)
+                    node = root
+                    parent = null
                 }
             } else {
-                // x is right child (symmetric cases)
-                var w = parent.left!!  // Sibling must exist due to RB properties
-                
-                if (w.color == Color.RED) {
+                // node is the right child (symmetric cases)
+                var w = p.left
+                if (colorOf(w) == Color.RED) {
                     // Case 1: Sibling is red
-                    w.color = Color.BLACK
-                    parent.color = Color.RED
-                    rotateRight(parent)
-                    w = parent.left!!
+                    w?.color = Color.BLACK
+                    p.color = Color.RED
+                    rotateRight(p)
+                    w = p.left
                 }
-                
-                if ((w.right?.color ?: Color.BLACK) == Color.BLACK && 
-                    (w.left?.color ?: Color.BLACK) == Color.BLACK) {
+
+                if (colorOf(w?.right) == Color.BLACK && colorOf(w?.left) == Color.BLACK) {
                     // Case 2: Both of sibling's children are black
-                    w.color = Color.RED
-                    x = parent
+                    w?.color = Color.RED
+                    node = p
+                    parent = p.parent
                 } else {
-                    if ((w.left?.color ?: Color.BLACK) == Color.BLACK) {
+                    if (colorOf(w?.left) == Color.BLACK) {
                         // Case 3: Sibling's left child is black, right is red
-                        w.right?.color = Color.BLACK
-                        w.color = Color.RED
-                        rotateLeft(w)
-                        w = parent.left!!
+                        w?.right?.color = Color.BLACK
+                        w?.color = Color.RED
+                        w?.let { rotateLeft(it) }
+                        w = p.left
                     }
                     // Case 4: Sibling's left child is red
-                    w.color = parent.color
-                    parent.color = Color.BLACK
-                    w.left?.color = Color.BLACK
-                    rotateRight(parent)
-                    x = root
+                    w?.color = p.color
+                    p.color = Color.BLACK
+                    w?.left?.color = Color.BLACK
+                    rotateRight(p)
+                    node = root
+                    parent = null
                 }
             }
         }
-        
-        x?.color = Color.BLACK
+
+        node?.color = Color.BLACK
     }
     
     // ========================================================================
@@ -507,47 +520,54 @@ open class UnsafeTreeMapCore<K, V> internal constructor(
         var y = z
         var yOriginalColor = y.color
         var x: Node<K, V>?
-        
+        // Parent of x's position. Tracked explicitly because x may be an absent (null) leaf,
+        // which carries no parent pointer of its own — deleteFixup needs it to navigate.
+        var xParent: Node<K, V>?
+
         when {
             z.left == null -> {
                 x = z.right
+                xParent = z.parent
                 transplant(z, z.right)
             }
             z.right == null -> {
                 x = z.left
+                xParent = z.parent
                 transplant(z, z.left)
             }
             else -> {
-                // Node has two children - find successor
+                // Node has two children - splice in the in-order successor
                 y = z.right!!.minimum()
                 yOriginalColor = y.color
                 x = y.right
-                
+
                 if (y.parent == z) {
+                    xParent = y
                     x?.parent = y
                 } else {
+                    xParent = y.parent
                     transplant(y, y.right)
                     y.right = z.right
                     y.right?.parent = y
                 }
-                
+
                 transplant(z, y)
                 y.left = z.left
                 y.left?.parent = y
                 y.color = z.color
             }
         }
-        
-        // Update sizes up the tree
-        var current = x?.parent ?: root
+
+        // Update sizes up the tree. x may be null, so fall back to its tracked parent.
+        var current = x?.parent ?: xParent
         while (current != null) {
             current.updateSize()
             current = current.parent
         }
-        
+
         // Fix red-black violations if we deleted a black node
         if (yOriginalColor == Color.BLACK) {
-            deleteFixup(x)
+            deleteFixup(x, xParent)
         }
     }
     
