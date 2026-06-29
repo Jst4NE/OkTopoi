@@ -10,6 +10,8 @@ import kotlinx.io.readString
 import kotlinx.io.writeString
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
 import kotlinx.coroutines.CoroutineScope
@@ -184,7 +186,10 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
                     // Phase 2: apply diff — per-entry files written since last compaction
                     // override snapshot entries (or add new ones)
                     val entryFiles = allFiles.filter { f ->
-                        f.name != SNAPSHOT_FILE &&
+                        // Files in the reserved namespace (snapshot, snapshot tmp, sidecars) are
+                        // never entries; no key-derived file starts with RESERVED_PREFIX because a
+                        // leading '_' in a key is escaped by keyToFileName.
+                        !f.name.startsWith(RESERVED_PREFIX) &&
                         !f.name.endsWith(TOMBSTONE_SUFFIX) &&
                         (fileSystem.metadataOrNull(f)?.size ?: 0) != 0L
                     }
@@ -215,8 +220,8 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
                     val tombstoneFiles = allFiles.filter { it.name.endsWith(TOMBSTONE_SUFFIX) }
                     tombstoneFiles.forEach { tomb ->
                         try {
-                            val keyJson = tomb.name.removeSuffix(TOMBSTONE_SUFFIX)
-                            val key = oktopoiJson.decodeFromString(persisted.keyTypeSerializer, keyJson)
+                            val keyFileName = tomb.name.removeSuffix(TOMBSTONE_SUFFIX)
+                            val key = fileNameToKey(keyFileName)
                             removeUnsafe(key)
                         } catch (e: Exception) {
                             Logger.e(e, tag = "OkTopoi-Eps") {
@@ -256,15 +261,93 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
         }
     }
 
+    // ========================================================================
+    // Key <-> file name encoding (filesystem-safe, byte-identical on every OS)
+    // ========================================================================
+
+    private val keyIsString by lazy {
+        persisted.keyTypeSerializer.descriptor.kind == PrimitiveKind.STRING
+    }
+
+    /**
+     * Reversible, OS-independent mapping from a key to its on-disk file name.
+     *
+     * String-kind keys use their raw string value (no JSON quotes) so the common case yields
+     * clean names like `alice`; numeric/boolean keys use their bare JSON (`123`, `true`); other
+     * (composite) keys fall back to full JSON. The result is then percent-escaped: every character
+     * illegal in a Windows file name (`< > : " / \ | ? *`), every ASCII control character, and the
+     * escape marker `%` itself become `%XX`. Escaping is applied on all platforms, so the produced
+     * name is identical everywhere — not just where a character happens to be legal. Finally a
+     * *leading* `_` is escaped, keeping the reserved `_` prefix (snapshot, sidecars) free of any
+     * key-derived file. Inverse of [fileNameToKey].
+     */
+    protected fun keyToFileName(key: KeyType): String {
+        val natural = if (keyIsString) {
+            // Unwrap the JSON string to its raw value: decode the quoted form back to String.
+            oktopoiJson.decodeFromString(
+                String.serializer(),
+                oktopoiJson.encodeToString(persisted.keyTypeSerializer, key)
+            )
+        } else {
+            oktopoiJson.encodeToString(persisted.keyTypeSerializer, key)
+        }
+        return escapeFileName(natural)
+    }
+
+    /** Inverse of [keyToFileName]. */
+    protected fun fileNameToKey(fileName: String): KeyType {
+        val natural = unescapeFileName(fileName)
+        val json = if (keyIsString) {
+            oktopoiJson.encodeToString(String.serializer(), natural)
+        } else {
+            natural
+        }
+        return oktopoiJson.decodeFromString(persisted.keyTypeSerializer, json)
+    }
+
+    private fun escapeFileName(s: String): String {
+        val sb = StringBuilder(s.length)
+        for (i in s.indices) {
+            val c = s[i]
+            val escape = c in FILENAME_ESCAPED_CHARS || c.code < 0x20 || (i == 0 && c == '_')
+            if (escape) {
+                sb.append('%').append(c.code.toString(16).uppercase().padStart(2, '0'))
+            } else {
+                sb.append(c)
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun unescapeFileName(s: String): String {
+        if ('%' !in s) return s
+        val sb = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c == '%' && i + 2 < s.length) {
+                val code = s.substring(i + 1, i + 3).toIntOrNull(16)
+                if (code != null) {
+                    sb.append(code.toChar())
+                    i += 3
+                    continue
+                }
+            }
+            sb.append(c)
+            i++
+        }
+        return sb.toString()
+    }
+
     // File I/O helper methods
     protected fun writeToFile(key: KeyType, content: String) {
-        val fileName = oktopoiJson.encodeToString(persisted.keyTypeSerializer, key)
+        val fileName = keyToFileName(key)
         val filePath = Path(dirPath, fileName)
         fileSystem.sink(filePath).buffered().use { it.writeString(content) }
     }
 
     protected fun deleteFromFile(key: KeyType) {
-        val fileName = oktopoiJson.encodeToString(persisted.keyTypeSerializer, key)
+        val fileName = keyToFileName(key)
         val filePath = Path(dirPath, fileName)
         if (fileSystem.exists(filePath)) {
             fileSystem.delete(filePath)
@@ -337,10 +420,7 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
             persisted.valueTypeSerializer,
             string
         )
-        val key = oktopoiJson.decodeFromString(
-            persisted.keyTypeSerializer,
-            fileName
-        )
+        val key = fileNameToKey(fileName)
         // Use unsafe put during initialization to avoid locking overhead; hooks are suppressed by persistenceLoadDepth
         putUnsafe(key, value)
     }
@@ -403,7 +483,7 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
         val out = ArrayList<Pair<String, String>>(sizeUnsafe)
         keysUnsafe().forEach { key ->
             val value = getUnsafe(key) ?: return@forEach
-            val fileName = oktopoiJson.encodeToString(persisted.keyTypeSerializer, key)
+            val fileName = keyToFileName(key)
             val content = serializeEntryForSnapshot(key, value)
             out.add(fileName to content)
         }
@@ -469,9 +549,10 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
         if (fileSystem.exists(snapshotPath)) fileSystem.delete(snapshotPath)
         fileSystem.atomicMove(tmpPath, snapshotPath)
 
-        // 3. Sweep stale per-entry files and tombstones
+        // 3. Sweep stale per-entry files and tombstones. Reserved-namespace files (the snapshot
+        // itself, its tmp, and any sidecars) are preserved — they are not entries.
         fileSystem.list(dirPath).forEach { f ->
-            if (f.name != SNAPSHOT_FILE) {
+            if (!f.name.startsWith(RESERVED_PREFIX)) {
                 try { fileSystem.delete(f) } catch (e: Exception) {
                     log.w(e) { "compact: failed to delete ${f.name}" }
                 }
@@ -481,10 +562,81 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
         log.d { "ESP[${callingClassName}.${propertyName}] compacted ${entries.size} entries into snapshot" }
     }
 
+    // ========================================================================
+    // Sidecars — collection-level auxiliary state stored beside the entries
+    // ========================================================================
+
+    /**
+     * A single auxiliary value persisted in this collection's directory, outside the entry set.
+     *
+     * Sidecars let a subclass attach collection-level metadata (e.g. a sync watermark) that lives
+     * beside the entries but is never treated as one. The file is named `_<name>`: the reserved
+     * '_' prefix keeps it out of the entry scan and the compaction sweep, and no key-derived file
+     * can collide (a leading '_' in a key is escaped). Reads are in-memory; writes are synchronous
+     * write-through. Create via [sidecar] after [setup] has assigned [dirPath].
+     */
+    inner class Sidecar<T> internal constructor(
+        name: String,
+        private val serializer: KSerializer<T>,
+        initial: T,
+    ) {
+        private val path = Path(dirPath, RESERVED_PREFIX + name)
+
+        private var current: T = run {
+            try {
+                if (fileSystem.exists(path)) {
+                    val content = fileSystem.source(path).buffered().use { it.readString() }
+                    if (content.isNotEmpty()) oktopoiJson.decodeFromString(serializer, content) else initial
+                } else {
+                    initial
+                }
+            } catch (e: Exception) {
+                log.w(e) { "Failed to load sidecar ${path.name}; using initial value" }
+                initial
+            }
+        }
+
+        var value: T
+            get() = current
+            set(newValue) {
+                current = newValue
+                try {
+                    fileSystem.sink(path).buffered().use {
+                        it.writeString(oktopoiJson.encodeToString(serializer, newValue))
+                    }
+                } catch (e: Exception) {
+                    log.w(e) { "Failed to persist sidecar ${path.name}" }
+                }
+            }
+    }
+
+    /**
+     * Create a [Sidecar] holding one value at `_<name>` in this collection's directory, loading any
+     * persisted value. Must be called after [setup] (when [dirPath] is set) — typically from an
+     * override that runs post-load. [name] must be non-empty and must not start with '_'.
+     */
+    protected fun <T> sidecar(name: String, serializer: KSerializer<T>, initial: T): Sidecar<T> {
+        check(this::dirPath.isInitialized) { "sidecar('$name') created before setup()" }
+        require(name.isNotEmpty() && !name.startsWith(RESERVED_PREFIX)) {
+            "sidecar name must be non-empty and must not start with '$RESERVED_PREFIX': '$name'"
+        }
+        return Sidecar(name, serializer, initial)
+    }
+
     companion object {
+        /**
+         * Reserved file-name prefix. Files whose name starts with this are not entries — they are
+         * OkTopoi-internal (the snapshot and its tmp) or subclass [sidecar]s. The entry scan and the
+         * compaction sweep both skip them. Safe as a sigil because no key-derived file name can
+         * start with it: [keyToFileName] escapes a leading '_' in a key.
+         */
+        internal const val RESERVED_PREFIX = "_"
         internal const val SNAPSHOT_FILE = "_snapshot.bin"
         internal const val SNAPSHOT_TMP_SUFFIX = ".tmp"
         internal const val TOMBSTONE_SUFFIX = ".tomb"
+
+        /** Characters illegal in a Windows file name; escaped (with '%' itself) on every platform. */
+        private val FILENAME_ESCAPED_CHARS = "<>:\"/\\|?*%".toSet()
 
         /**
          * If a setup() load encounters at least this many per-entry files + tombstones, it folds

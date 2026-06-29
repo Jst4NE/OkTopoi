@@ -290,7 +290,7 @@ override fun setup() {
 override fun fromPersistString(string: String, fileName: String) {
         val combined = oktopoiJson.decodeFromString(PersistedValueWithSync.serializer(persisted.valueTypeSerializer), string)
         // Extract key from filename (always contains serialized key)
-        val key = oktopoiJson.decodeFromString(persisted.keyTypeSerializer, fileName)
+        val key = fileNameToKey(fileName)
 
         // Notify subclasses about the loaded entry (no extra I/O)
         onPersistedEntryLoaded(key, combined.value, combined.syncTimestamp)
@@ -602,7 +602,7 @@ override fun fromPersistString(string: String, fileName: String) {
             fileSystem.createDirectories(errorDir)
 
             val timestamp = Clock.System.now().toEpochMilliseconds()
-            val serializedKey = oktopoiJson.encodeToString(persisted.keyTypeSerializer, key)
+            val serializedKey = keyToFileName(key)
             val baseName = "${callingClassName}.${propertyName}_${timestamp}_${serializedKey}"
 
             // Archive the data (value + sync metadata)
@@ -796,8 +796,7 @@ override fun fromPersistString(string: String, fileName: String) {
             val value = getUnsafe(key) ?: return@forEach
             seen.add(key)
             out.add(
-                oktopoiJson.encodeToString(persisted.keyTypeSerializer, key) to
-                    serializeEntryForSnapshot(key, value)
+                keyToFileName(key) to serializeEntryForSnapshot(key, value)
             )
         }
         // Pending-delete entries live only in unsyncedKeysMap with timestamp < 0 — their persisted
@@ -811,7 +810,7 @@ override fun fromPersistString(string: String, fileName: String) {
                 PersistedValueWithSync(null, entry.timestamp, entry.lastSyncedValue)
             )
             out.add(
-                oktopoiJson.encodeToString(persisted.keyTypeSerializer, key) to content
+                keyToFileName(key) to content
             )
         }
         return out
