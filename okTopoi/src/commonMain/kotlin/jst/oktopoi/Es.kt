@@ -417,9 +417,10 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             map[secondaryKeyValue]?.let { if (it.isEmpty()) map.remove(secondaryKeyValue) }
         }
 
-        // Helper: rebuild entire map from current state
+        // Helper: rebuild entire map from current state.
+        // Reconciles in place (see [reconcileGroupedLists]) so each group's SnapshotStateList
+        // instance stays stable across rebuilds — consumers may hold a child-list reference.
         suspend fun rebuild() {
-            map.clear()
             val grouped = mutableMapOf<SK, MutableList<Map.Entry<KeyType, ValueType>>>()
 
             // Use suspend API to get entries (prevents runBlocking)
@@ -431,9 +432,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                 }
             }
 
-            grouped.forEach { (secKeyValue, entries) ->
-                map[secKeyValue] = entries.sortedWith(entryComparator).toMutableStateList()
-            }
+            reconcileGroupedLists(map, grouped.mapValues { (_, entries) -> entries.sortedWith(entryComparator) })
         }
 
         LaunchedEffect(groupByKey, entryComparator, filter, minActiveState) {
@@ -1403,9 +1402,10 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             resultMap[groupKey]?.let { if (it.isEmpty()) resultMap.remove(groupKey) }
         }
 
-        // Helper: rebuild entire map from current state
+        // Helper: rebuild entire map from current state.
+        // Reconciles in place (see [reconcileGroupedLists]) so each group's SnapshotStateList
+        // instance stays stable across rebuilds — consumers may hold a child-list reference.
         suspend fun rebuild() = mutationMutex.withLock {
-            resultMap.clear()
             dependencyTracker.clear()
             primaryToGroup.clear()
 
@@ -1429,10 +1429,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                 }
             }
 
-            // Convert grouped lists to SnapshotStateLists and add to map
-            grouped.forEach { (groupKey, entries) ->
-                resultMap[groupKey] = entries.sortedWith(entryComparator).toMutableStateList()
-            }
+            reconcileGroupedLists(resultMap, grouped.mapValues { (_, entries) -> entries.sortedWith(entryComparator) })
         }
 
         // Helper: re-evaluate a specific primary entry

@@ -560,7 +560,9 @@ fun <G : Any, T : Any> mergedSnapshotStateMap(
     }
 
     suspend fun rebuild() {
-        resultMap.clear()
+        // Reconcile in place — do NOT clear resultMap or reassign its group lists. See
+        // [reconcileGroupedLists] for why the per-group SnapshotStateList instances must
+        // stay stable across rebuilds.
         keyToGroupAndValue.clear()
         dependencyTracker.clear()
 
@@ -581,10 +583,13 @@ fun <G : Any, T : Any> mergedSnapshotStateMap(
             }
         }
 
-        grouped.forEach { (groupKey, items) ->
-            items.sortWith(compareBy(comparator) { it.second })
-            resultMap[groupKey] = items.map { it.second }.toMutableStateList()
-        }
+        reconcileGroupedLists(
+            resultMap,
+            grouped.mapValues { (_, items) ->
+                items.sortWith(compareBy(comparator) { it.second })
+                items.map { it.second }
+            },
+        )
     }
 
     // --- Collector coroutine ---
@@ -745,4 +750,47 @@ private fun <T> findInsertionPointInList(
     }
 
     return low
+}
+
+/**
+ * Reconciles a grouped reactive map ([resultMap]) to match [sortedGrouped] **in place**,
+ * keeping each surviving group's [SnapshotStateList] instance identical across the call.
+ *
+ * Shared by every grouped-map rebuild path (`mergedSnapshotStateMap`,
+ * `asSnapshotStateMapBySecondaryKey`, `asSnapshotStateMapWithJoins`). It exists because a
+ * `rebuild()` does NOT only run at first composition — it also fires on collector
+ * re-subscription (a lifecycle STARTED transition) and on bulk Rebuild events. The naive
+ * `resultMap.clear()` + `resultMap[k] = …toMutableStateList()` replaces the per-group list
+ * objects, which silently orphans any consumer that captured a child list (e.g.
+ * `val items = map[key]` later read inside a `remember { derivedStateOf { …items… } }`):
+ * subsequent in-place inserts land in the new instance while the consumer keeps reading the
+ * dead one, so the change never appears until the consumer is recreated. Reconciling in place
+ * preserves the instances, so per-group lists are safe to hold/capture.
+ *
+ * Unchanged groups are skipped (element-wise value equality) so they trigger no recomposition;
+ * groups with no remaining items are removed. [sortedGrouped] must already be sorted.
+ */
+internal fun <G, V> reconcileGroupedLists(
+    resultMap: SnapshotStateMap<G, SnapshotStateList<V>>,
+    sortedGrouped: Map<G, List<V>>,
+) {
+    // Remove groups that no longer have any items (snapshot the keys first to avoid mutating
+    // the map while iterating it).
+    val liveKeys = sortedGrouped.keys
+    resultMap.keys.filter { it !in liveKeys }.toList().forEach { resultMap.remove(it) }
+
+    sortedGrouped.forEach { (groupKey, newItems) ->
+        val existing = resultMap[groupKey]
+        if (existing == null) {
+            // New group — no consumer can hold this instance yet, so create it.
+            resultMap[groupKey] = newItems.toMutableStateList()
+        } else {
+            val changed = existing.size != newItems.size ||
+                existing.indices.any { existing[it] != newItems[it] }
+            if (changed) {
+                existing.clear()
+                existing.addAll(newItems)
+            }
+        }
+    }
 }
