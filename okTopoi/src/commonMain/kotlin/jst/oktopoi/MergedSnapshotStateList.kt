@@ -563,6 +563,16 @@ fun <G : Any, T : Any> mergedSnapshotStateMap(
         // Reconcile in place — do NOT clear resultMap or reassign its group lists. See
         // [reconcileGroupedLists] for why the per-group SnapshotStateList instances must
         // stay stable across rebuilds.
+        //
+        // Instance identity must stay consistent between [keyToGroupAndValue] and the
+        // per-group lists: [removeFromGroup] locates the list entry by `===`. Because
+        // [reconcileGroupedLists] KEEPS the existing list (its old instances) for any group
+        // whose items are value-unchanged, we must likewise keep the OLD tracked instance
+        // for those entries instead of overwriting it with the freshly projected (equal but
+        // distinct) one. Otherwise the tracking map and the list diverge, a later
+        // identity-based removeFromGroup can't find the entry, and the next insert leaves a
+        // stale duplicate behind — crashing LazyColumn/Row with a duplicate key.
+        val previous = HashMap(keyToGroupAndValue)
         keyToGroupAndValue.clear()
         dependencyTracker.clear()
 
@@ -576,8 +586,14 @@ fun <G : Any, T : Any> mergedSnapshotStateMap(
                     val projected = projectEntry(sourceIndex, entry.key, entry.value)
                     if (projected != null) {
                         val mergeKey = MergeKey(sourceIndex, entry.key)
-                        keyToGroupAndValue[mergeKey] = groupKey to projected
-                        grouped.getOrPut(groupKey) { mutableListOf() }.add(mergeKey to projected)
+                        // Keep the prior instance when value-equal in the same group, so the
+                        // tracking map matches the instances reconcile will keep in the list.
+                        val prior = previous[mergeKey]
+                        val canonical =
+                            if (prior != null && prior.first == groupKey && prior.second == projected) prior.second
+                            else projected
+                        keyToGroupAndValue[mergeKey] = groupKey to canonical
+                        grouped.getOrPut(groupKey) { mutableListOf() }.add(mergeKey to canonical)
                     }
                 }
             }
