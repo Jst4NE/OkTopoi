@@ -557,6 +557,22 @@ override fun fromPersistString(string: String, fileName: String) {
     }
 
     /**
+     * Hook called after a non-retryable sync error has been archived and the local entry
+     * rolled back (or removed). Lets subclasses surface the failure to the user instead of
+     * it living only in `.oktopoi-sync-errors/` and logs.
+     *
+     * Runs on the sync scope; exceptions thrown here are caught and logged so they cannot
+     * poison the outbound sync loop.
+     *
+     * @param key The key whose write failed
+     * @param value The value that failed to sync (null when the failed write was a deletion)
+     * @param error The non-retryable exception the sync backend threw
+     * @param rolledBack true if the entry was rolled back to its last synced value;
+     *   false if it had no prior synced state and was removed entirely
+     */
+    protected open fun onSyncErrorArchived(key: KeyType, value: ValueType?, error: Exception, rolledBack: Boolean) {}
+
+    /**
      * Archives a non-retryable sync error.
      *
      * If a `lastSyncedValue` is available, rolls the in-memory and persisted state back to it
@@ -564,7 +580,7 @@ override fun fromPersistString(string: String, fileName: String) {
      * entirely (the original behavior — used when there's no prior synced state to recover to).
      *
      * In both cases, the failed value and error details are archived under .oktopoi-sync-errors/
-     * for inspection.
+     * for inspection, and [onSyncErrorArchived] is invoked so subclasses can surface the failure.
      */
     private fun archiveSyncError(key: KeyType, value: ValueType?, error: Exception) {
         val (syncTimestamp, rolledBackTo) = withWriteLockBlocking {
@@ -640,6 +656,15 @@ override fun fromPersistString(string: String, fileName: String) {
         //    rollback already overwrote it with the synced value via persistEntry above)
         if (rolledBackTo == null) {
             try { deleteFromFile(key) } catch (_: Exception) {}
+        }
+
+        // 6. Notify subclasses so the failure can be surfaced to the user
+        try {
+            onSyncErrorArchived(key, value, error, rolledBackTo != null)
+        } catch (hookError: Exception) {
+            Logger.e(hookError, tag = "OkTopoi-Esps") {
+                "onSyncErrorArchived hook failed for ${propertyName}[$key]"
+            }
         }
     }
 
