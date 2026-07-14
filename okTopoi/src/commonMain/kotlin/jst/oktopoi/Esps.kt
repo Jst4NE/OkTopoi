@@ -334,6 +334,21 @@ override fun fromPersistString(string: String, fileName: String) {
     protected open suspend fun onAfterFromSync(key: KeyType, value: ValueType?, timestamp: Long, synced: Boolean) {}
 
     /**
+     * Extended variant of [onAfterFromSync] that also carries the value the store held
+     * BEFORE this fromSync applied (captured under the same write lock; null if absent).
+     * Default implementation delegates to the 4-arg hook for backward compatibility.
+     *
+     * @param key The key that was synced
+     * @param oldValue The value held for [key] before this sync applied (null if absent)
+     * @param value The value that was synced (null for deletions)
+     * @param timestamp The sync timestamp
+     * @param synced Whether the sync was actually performed (false if rejected due to timestamp)
+     */
+    protected open suspend fun onAfterFromSync(key: KeyType, oldValue: ValueType?, value: ValueType?, timestamp: Long, synced: Boolean) {
+        onAfterFromSync(key, value, timestamp, synced)
+    }
+
+    /**
      * Inserts a value received from sync and marks it as synced.
      * Only updates if the provided timestamp is greater than current sync timestamp (unless force=true).
      *
@@ -347,7 +362,12 @@ override fun fromPersistString(string: String, fileName: String) {
     suspend fun fromSync(key: KeyType, value: ValueType?, timestamp: Long, force: Boolean = false): Boolean {
         onBeforeFromSync(key, value, timestamp, force)
 
+        var oldValue: ValueType? = null
         val synced = withWriteLock {
+            // Capture before any mutation (and before the timestamp-rejection early return,
+            // where the current value IS the old value) — getUnsafe is only safe under the lock.
+            oldValue = getUnsafe(key)
+
             val currentTimestamp = unsyncedKeysMap[key]?.timestamp ?: 0L
 
             log.d { "[${this@Esps.callingClassName}.${this@Esps.propertyName}] currentTimestamp: $currentTimestamp; incomingTimestamp: $timestamp" }
@@ -373,7 +393,7 @@ override fun fromPersistString(string: String, fileName: String) {
             true
         }
 
-        onAfterFromSync(key, value, timestamp, synced)
+        onAfterFromSync(key, oldValue, value, timestamp, synced)
         return synced
     }
 
