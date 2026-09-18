@@ -5,7 +5,7 @@ package jst.oktopoi
  * 
  * This class provides a complete implementation of both MutableMap and NavigableMap operations
  * using a red-black tree data structure. It is designed to be wrapped by thread-safe views
- * (BlockingTreeMapView and SuspendTreeMapView) that handle concurrency concerns.
+ * (concurrency, persistence and reactivity live in TreeMap and its subclasses).
  * 
  * Performance characteristics:
  * - All basic operations (get, put, remove): O(log n)
