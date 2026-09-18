@@ -85,9 +85,9 @@ class GroupedMergeSource<K : Any, V : Any, G : Any, T : Any>(
  * Convenience extension to create a [MergeSource] from an Es collection.
  *
  * ```kotlin
- * Data.stops.asMergeSource { entry, ctx ->
- *     val driver = ctx.fetch(Data.drivers, entry.value.driverId)
- *     TimelineItem.Stop(entry.value, driver)
+ * Data.orders.asMergeSource { entry, ctx ->
+ *     val agent = ctx.fetch(Data.users, entry.value.agentId)
+ *     ActivityItem.Stop(entry.value, agent)
  * }
  * ```
  */
@@ -100,8 +100,8 @@ fun <K : Any, V : Any, T : Any> Es<K, V>.asMergeSource(
  * Convenience extension to create a [GroupedMergeSource] from an Es collection.
  *
  * ```kotlin
- * Data.stops.asGroupedMergeSource("truckId") { entry, ctx ->
- *     TimelineItem.Stop(entry.value)
+ * Data.orders.asGroupedMergeSource("customerId") { entry, ctx ->
+ *     ActivityItem.Stop(entry.value)
  * }
  * ```
  */
@@ -178,17 +178,17 @@ private sealed interface MergeEvent {
  *
  * ```kotlin
  * val timeline = mergedSnapshotStateList(
- *     Data.stops.asMergeSource { entry, ctx ->
- *         val driver = ctx.fetch(Data.drivers, entry.value.driverId)
- *         TimelineItem.Stop(entry.value, driver, sortKey = entry.value.sequence)
+ *     Data.orders.asMergeSource { entry, ctx ->
+ *         val agent = ctx.fetch(Data.users, entry.value.agentId)
+ *         ActivityItem.Stop(entry.value, agent, sortKey = entry.value.sequence)
  *     },
- *     Data.driverAssignments.asMergeSource { entry, _ ->
- *         TimelineItem.DriverChange(entry.value, sortKey = entry.value.sequence)
+ *     Data.payments.asMergeSource { entry, _ ->
+ *         ActivityItem.Payment(entry.value, sortKey = entry.value.sequence)
  *     },
- *     Data.unmatchedFtlEvents.asMergeSource { entry, ctx ->
- *         val stops = ctx.fetchBy(Data.stops, "truckId" to entry.value.truckId)
- *         val sortKey = interpolatePosition(stops, entry.value.timestamp)
- *         TimelineItem.UnmatchedFtl(entry.value, sortKey = sortKey)
+ *     Data.unlinkedEvents.asMergeSource { entry, ctx ->
+ *         val orders = ctx.fetchBy(Data.orders, "customerId" to entry.value.customerId)
+ *         val sortKey = interpolatePosition(orders, entry.value.timestamp)
+ *         ActivityItem.Unlinked(entry.value, sortKey = sortKey)
  *     },
  *     comparator = compareBy { it.sortKey },
  * )
@@ -414,9 +414,9 @@ fun <T : Any> mergedSnapshotStateList(
  * the group key. When an entry changes, only the affected group's [SnapshotStateList] is updated,
  * providing per-group granular reactivity.
  *
- * This is ideal for scenarios like a truck table where each truck column shows a merged timeline —
- * one subscription per source Es handles all trucks, and a stop change only touches that stop's
- * truck group.
+ * This is ideal for scenarios like a customer table where each customer column shows a merged timeline —
+ * one subscription per source Es handles all customers, and a stop change only touches that stop's
+ * customer group.
  *
  * ## How It Works
  *
@@ -439,27 +439,27 @@ fun <T : Any> mergedSnapshotStateList(
  * ## Example
  *
  * ```kotlin
- * val truckTimelines: SnapshotStateMap<Long, SnapshotStateList<TimelineItem>> =
+ * val activityByCustomer: SnapshotStateMap<Long, SnapshotStateList<ActivityItem>> =
  *     mergedSnapshotStateMap(
- *         GroupedMergeSource(Data.stops, "truckId") { entry, ctx ->
- *             val driver = ctx.fetch(Data.drivers, entry.value.driverId)
- *             TimelineItem.Stop(entry.value, driver)
+ *         GroupedMergeSource(Data.orders, "customerId") { entry, ctx ->
+ *             val agent = ctx.fetch(Data.users, entry.value.agentId)
+ *             ActivityItem.Stop(entry.value, agent)
  *         },
- *         GroupedMergeSource(Data.driverAssignments, "truckId") { entry, _ ->
- *             TimelineItem.DriverChange(entry.value)
+ *         GroupedMergeSource(Data.payments, "customerId") { entry, _ ->
+ *             ActivityItem.Payment(entry.value)
  *         },
- *         GroupedMergeSource(Data.unmatchedFtlEvents, "truckId") { entry, ctx ->
- *             val stops = ctx.fetchBy(Data.stops, "truckId" to entry.value.truckId)
- *             val sortKey = interpolatePosition(stops, entry.value.timestamp)
- *             TimelineItem.UnmatchedFtl(entry.value, sortKey = sortKey)
+ *         GroupedMergeSource(Data.unlinkedEvents, "customerId") { entry, ctx ->
+ *             val orders = ctx.fetchBy(Data.orders, "customerId" to entry.value.customerId)
+ *             val sortKey = interpolatePosition(orders, entry.value.timestamp)
+ *             ActivityItem.Unlinked(entry.value, sortKey = sortKey)
  *         },
  *         comparator = compareBy { it.sortKey },
  *     )
  *
- * // In the truck table — only affected truck column recomposes:
+ * // In the customer table — only affected customer column recomposes:
  * LazyRow {
- *     items(visibleTruckIds) { truckId ->
- *         TruckColumn(truckTimelines[truckId] ?: emptyList())
+ *     items(visibleCustomerIds) { customerId ->
+ *         CustomerColumn(activityByCustomer[customerId] ?: emptyList())
  *     }
  * }
  * ```

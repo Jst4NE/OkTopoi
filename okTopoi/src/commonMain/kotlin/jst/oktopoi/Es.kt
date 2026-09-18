@@ -380,15 +380,15 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      *
      * @sample
      * ```kotlin
-     * // Group dispatches by journey ID
-     * val dispatchesByJourney = dispatches.asSnapshotStateMapBySecondaryKey(
-     *     groupByKey = DispatchDto::journeyId.name,
+     * // Group orderItems by order ID
+     * val itemsByOrder = orderItems.asSnapshotStateMapBySecondaryKey(
+     *     groupByKey = ItemDto::orderId.name,
      *     entryComparator = compareBy { it.value.sequenceNumber },
      *     filter = { it.value.progress != ProgressType.COMPLETED }
      * )
      *
-     * // Access in JourneyCard - only this card recomposes on changes
-     * val dispatches = dispatchesByJourney[journey.id] ?: emptyList()
+     * // Access in OrderCard - only this card recomposes on changes
+     * val orderItems = itemsByOrder[order.id] ?: emptyList()
      * ```
      */
     @Composable
@@ -684,10 +684,10 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      *
      * ```kotlin
      * @Composable
-     * fun DriverCard(driverId: Long) {
-     *     val driver by Data.drivers.asState(driverId)
+     * fun AgentCard(agentId: Long) {
+     *     val agent by Data.users.asState(agentId)
      *
-     *     Text(driver?.let { "${it.firstName} ${it.lastName}" } ?: "Unknown")
+     *     Text(agent?.let { "${it.firstName} ${it.lastName}" } ?: "Unknown")
      * }
      * ```
      *
@@ -758,11 +758,11 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      *
      * ```kotlin
      * @Composable
-     * fun JourneyHeader(journeyId: Long) {
-     *     val journey by Data.journeys.getState(journeyId)
+     * fun OrderHeader(orderId: Long) {
+     *     val order by Data.orders.getState(orderId)
      *
-     *     // Displays journey info at time of composition, won't update if journey changes
-     *     Text("Journey from ${journey?.startTime}")
+     *     // Displays order info at time of composition, won't update if order changes
+     *     Text("Order from ${order?.startTime}")
      * }
      * ```
      *
@@ -815,35 +815,35 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      * ```kotlin
      * // Basic usage - async transformation
      * @Composable
-     * fun JourneyHeader(journeyId: Long) {
-     *     val displayName by Data.journeys.mapState(journeyId) { journey ->
-     *         journey?.getDisplayName()  // suspend function
+     * fun OrderHeader(orderId: Long) {
+     *     val displayName by Data.orders.mapState(orderId) { order ->
+     *         order?.getDisplayName()  // suspend function
      *     }
      *     Text(displayName ?: "Unknown")
      * }
      *
      * // With dependencies - recompute when context changes
      * @Composable
-     * fun FormattedDate(journeyId: Long) {
+     * fun FormattedDate(orderId: Long) {
      *     val timezone = TimeZone.currentSystemDefault()
      *     val locale = LocaleList.current[0]
      *
-     *     val formattedDate by Data.journeys.mapState(journeyId, timezone, locale) { journey ->
-     *         journey?.startTime?.format(timezone, locale)
+     *     val formattedDate by Data.orders.mapState(orderId, timezone, locale) { order ->
+     *         order?.startTime?.format(timezone, locale)
      *     }
      *     Text(formattedDate ?: "")
      * }
      *
      * // Chaining async operations
      * @Composable
-     * fun DriverName(journeyId: Long) {
-     *     val driverName by Data.journeys.mapState(journeyId) { journey ->
-     *         journey?.let {
-     *             val driver = Data.drivers.get(it.driverId)
-     *             "${driver?.firstName} ${driver?.lastName}"
+     * fun AgentName(orderId: Long) {
+     *     val agentName by Data.orders.mapState(orderId) { order ->
+     *         order?.let {
+     *             val agent = Data.users.get(it.agentId)
+     *             "${agent?.firstName} ${agent?.lastName}"
      *         }
      *     }
-     *     Text(driverName ?: "No driver")
+     *     Text(agentName ?: "No agent")
      * }
      * ```
      *
@@ -898,15 +898,15 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      *
      * ```kotlin
      * @Composable
-     * fun JourneyCard(journeyId: Long) {
-     *     // Use placeholder journey to prevent empty state during load
-     *     val placeholderJourney = JourneyDto(id = journeyId, startTime = Clock.System.now(), ...)
+     * fun OrderCard(orderId: Long) {
+     *     // Use placeholder order to prevent empty state during load
+     *     val placeholderOrder = OrderDto(id = orderId, startTime = Clock.System.now(), ...)
      *
-     *     val displayName by Data.journeys.mapState(
-     *         key = journeyId,
-     *         initialValue = placeholderJourney
-     *     ) { journey ->
-     *         journey?.getDisplayName() ?: "Loading..."
+     *     val displayName by Data.orders.mapState(
+     *         key = orderId,
+     *         initialValue = placeholderOrder
+     *     ) { order ->
+     *         order?.getDisplayName() ?: "Loading..."
      *     }
      *     Text(displayName)
      * }
@@ -964,26 +964,26 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      *
      * ```kotlin
      * @Composable
-     * fun StatisticsPanel(selectedDriverId: Long?, selectedMonth: Int) {
-     *     // Recompute when filter changes, not when journeys change
-     *     val completedCount by Data.journeys.mapState(selectedDriverId, selectedMonth) { journeys ->
-     *         journeys.values()
-     *             .filter { it.driverId == selectedDriverId }
+     * fun StatisticsPanel(selectedAgentId: Long?, selectedMonth: Int) {
+     *     // Recompute when filter changes, not when orders change
+     *     val completedCount by Data.orders.mapState(selectedAgentId, selectedMonth) { orders ->
+     *         orders.values()
+     *             .filter { it.agentId == selectedAgentId }
      *             .filter { it.startTime.month == selectedMonth }
-     *             .count { it.status == JourneyStatus.COMPLETED }
+     *             .count { it.status == OrderStatus.COMPLETED }
      *     }
      *     Text("Completed: $completedCount")
      * }
      *
      * // Alternative with suspend operations
      * @Composable
-     * fun TotalDistance(driverId: Long) {
-     *     val distance by Data.journeys.mapState(driverId) { journeys ->
-     *         journeys.values()
-     *             .filter { it.driverId == driverId }
-     *             .sumOf { journey ->
+     * fun TotalDistance(agentId: Long) {
+     *     val distance by Data.orders.mapState(agentId) { orders ->
+     *         orders.values()
+     *             .filter { it.agentId == agentId }
+     *             .sumOf { order ->
      *                 // Can call suspend functions
-     *                 journey.computeDistance()
+     *                 order.computeDistance()
      *             }
      *     }
      *     Text("Total: ${distance}km")
@@ -1038,52 +1038,52 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      * ## Use Cases
      *
      * Perfect for complex queries like:
-     * - Multi-table joins (e.g., deliveries joining dropoffs → dispatches → journeys → pickups)
+     * - Multi-table joins (e.g., shipments joining shipments → orderItems → orders → customers)
      * - Nested filtering with foreign key relationships
      * - Computed views that depend on multiple collections
      * - Any scenario where `derivedStateOf` would recompute too much
      *
-     * ## Example: Deliveries Query
+     * ## Example: Shipments Query
      *
      * ```kotlin
-     * val deliveries = Data.dropoffFuels.asSnapshotStateListWithJoins(
-     *     entryComparator = compareBy { it.value.journeyDto.startTime },
+     * val shipments = Data.shipmentProducts.asSnapshotStateListWithJoins(
+     *     entryComparator = compareBy { it.value.orderDto.startTime },
      *     filterMap = remember(timeRange, filters...) {
-     *         { dropoffEntry, fetch ->
-     *             val dropoff = dropoffEntry.value
+     *         { shipmentEntry, fetch ->
+     *             val shipment = shipmentEntry.value
      *
      *             // fetch() tracks all lookups automatically
-     *             val dispatch = fetch(Data.dispatches, dropoff.id) ?: return@filterMap null
-     *             val journey = fetch(Data.journeys, dispatch.journeyId) ?: return@filterMap null
-     *             val pickup = fetch(Data.pickupFuels, dropoff.pickupId) ?: return@filterMap null
+     *             val item = fetch(Data.orderItems, shipment.id) ?: return@filterMap null
+     *             val order = fetch(Data.orders, item.orderId) ?: return@filterMap null
+     *             val customer = fetch(Data.customerProducts, shipment.customerId) ?: return@filterMap null
      *
      *             // Filters
-     *             if (journey.startTime !in timeRange) return@filterMap null
-     *             if (!selectedDrivers.contains(journey.driverId)) return@filterMap null
+     *             if (order.startTime !in timeRange) return@filterMap null
+     *             if (!selectedAgents.contains(order.agentId)) return@filterMap null
      *
      *             // Build final DTO
-     *             FromToFuelDeliveryDto(journey, dispatch, pickup, dropoff)
+     *             FromToProductShipmentDto(order, item, customer, shipment)
      *         }
      *     }
      * )
      *
      * // Usage in LazyColumn
      * LazyColumn {
-     *     items(deliveries, key = { it.key }) { entry ->
-     *         DeliveryCard(delivery = entry.value) // entry.value is FromToFuelDeliveryDto
+     *     items(shipments, key = { it.key }) { entry ->
+     *         ShipmentCard(shipment = entry.value) // entry.value is FromToProductShipmentDto
      *     }
      * }
      *
-     * // When journey #123 changes:
-     * // → Only dropoffs that fetched journey #123 re-evaluate (e.g., 2 entries)
-     * // → Not all 50 deliveries
+     * // When order #123 changes:
+     * // → Only shipments that fetched order #123 re-evaluate (e.g., 2 entries)
+     * // → Not all 50 shipments
      * ```
      *
      * ## Dependency Tracking Strategy
      *
      * Dependencies are tracked for ALL entries, even those filtered out. This ensures full reactivity:
      * - If a filtered-out entry's dependencies change such that it should now appear, it will
-     * - Example: Journey time changes from 14:00 → 10:00, delivery appears in 9:00-12:00 filter
+     * - Example: Order time changes from 14:00 → 10:00, shipment appears in 9:00-12:00 filter
      *
      * ## Important Notes
      *
@@ -1124,7 +1124,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
         // Serializes resultList mutations across the two LaunchedEffects below
         // (primary-collection changes and dependency changes). Both call suspend
-        // helpers whose filterMap suspends at every fetch(); on the UI dispatcher
+        // helpers whose filterMap suspends at every fetch(); on the UI itemer
         // those suspension points let a reEvaluateEntry() interleave with a
         // rebuild() — which clears the list up front and re-adds at the end —
         // producing a transient duplicate key that crashes LazyColumn/LazyRow.
@@ -1277,65 +1277,65 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      * ## Use Cases
      *
      * Perfect for scenarios like:
-     * - Grouping complex multi-table queries (e.g., dispatches by journey with fuel joins)
+     * - Grouping complex multi-table queries (e.g., orderItems by order with product joins)
      * - Eliminating `derivedStateOf { list.groupBy {...} }` anti-patterns
      * - Per-group reactivity with foreign key relationships
      * - Any scenario where you need both joins AND grouping with optimal reactivity
      *
-     * ## Example: Dispatches by Journey
+     * ## Example: Itemes by Order
      *
      * ```kotlin
      * // Before: Using asSnapshotStateListWithJoins + derivedStateOf (non-granular reactivity)
-     * val dispatchesWithFuel = Data.dispatches.asSnapshotStateListWithJoins<DispatchWithFuel>(...)
-     * val dispatchesByJourney by remember {
+     * val itemesWithProduct = Data.orderItems.asSnapshotStateListWithJoins<ItemWithProduct>(...)
+     * val itemsByOrder by remember {
      *     derivedStateOf {
-     *         dispatchesWithFuel.groupBy { it.value.dispatch.journeyId }
+     *         itemesWithProduct.groupBy { it.value.item.orderId }
      *     }
      * }
      *
-     * // After: Using asSnapshotStateMapWithJoins (granular per-journey reactivity)
-     * val dispatchesByJourney = Data.dispatches.asSnapshotStateMapWithJoins<Long, DispatchWithFuel>(
-     *     groupByKey = { it.dispatch.journeyId },
-     *     entryComparator = compareBy { it.value.dispatch.sequenceNumber },
+     * // After: Using asSnapshotStateMapWithJoins (granular per-order reactivity)
+     * val itemsByOrder = Data.orderItems.asSnapshotStateMapWithJoins<Long, ItemWithProduct>(
+     *     groupByKey = { it.item.orderId },
+     *     entryComparator = compareBy { it.value.item.sequenceNumber },
      *     filterMap = remember(filters...) {
-     *         { dispatchEntry, fetch ->
-     *             val dispatch = dispatchEntry.value
+     *         { itemEntry, fetch ->
+     *             val item = itemEntry.value
      *
      *             // Fetch related data with automatic dependency tracking
-     *             val fuel = when (dispatch.type) {
-     *                 DispatchType.PICKUP -> fetch(Data.pickupFuels, dispatch.id) ?: return@filterMap null
-     *                 DispatchType.DROPOFF -> fetch(Data.dropoffFuels, dispatch.id) ?: return@filterMap null
+     *             val product = when (item.type) {
+     *                 ItemType.PHYSICAL -> fetch(Data.products, item.productId) ?: return@filterMap null
+     *                 ItemType.DIGITAL -> fetch(Data.licenses, item.productId) ?: return@filterMap null
      *             }
      *
      *             // Apply filters
-     *             if (selectedWarehouses.isNotEmpty() && !selectedWarehouses.contains(dispatch.warehouseId)) {
+     *             if (selectedSuppliers.isNotEmpty() && !selectedSuppliers.contains(item.supplierId)) {
      *                 return@filterMap null
      *             }
      *
      *             // Build final DTO
-     *             DispatchWithFuel(dispatch, fuel)
+     *             ItemWithProduct(item, product)
      *         }
      *     }
      * )
      *
-     * // Usage in LazyColumn - only affected journey's card recomposes
+     * // Usage in LazyColumn - only affected order's card recomposes
      * LazyColumn {
-     *     items(journeys, key = { it.key }) { journeyEntry ->
-     *         val dispatches = dispatchesByJourney[journeyEntry.value.id] ?: emptyList()
-     *         JourneyCard(journey = journeyEntry.value, dispatches = dispatches)
+     *     items(orders, key = { it.key }) { orderEntry ->
+     *         val orderItems = itemsByOrder[orderEntry.value.id] ?: emptyList()
+     *         OrderCard(order = orderEntry.value, orderItems = orderItems)
      *     }
      * }
      *
-     * // When dispatch #456 changes:
-     * // → Only journey #123's dispatch list updates (if dispatch #456 belongs to journey #123)
-     * // → Other journeys' lists are unaffected
+     * // When item #456 changes:
+     * // → Only order #123's item list updates (if item #456 belongs to order #123)
+     * // → Other orders' lists are unaffected
      * ```
      *
      * ## Dependency Tracking Strategy
      *
      * Dependencies are tracked for ALL primary entries, even those filtered out. This ensures full reactivity:
      * - If a filtered-out entry's dependencies change such that it should now appear, it will
-     * - Example: Dispatch warehouse changes from A → B, appears in warehouse B filter
+     * - Example: Item supplier changes from A → B, appears in supplier B filter
      *
      * ## Important Notes
      *
@@ -1595,19 +1595,19 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      *
      * ```kotlin
      * @Composable
-     * fun WarehouseSelector() {
-     *     // Pre-compute display names for all warehouses
-     *     val warehouseDisplayNames = Data.warehouses.asSnapshotStateMapTransformed { entry ->
+     * fun SupplierSelector() {
+     *     // Pre-compute display names for all suppliers
+     *     val supplierDisplayNames = Data.suppliers.asSnapshotStateMapTransformed { entry ->
      *         entry.value.getDisplayName()  // suspend function
      *     }
      *
-     *     val warehouses = Data.warehouses.asSnapshotStateList()
+     *     val suppliers = Data.suppliers.asSnapshotStateList()
      *
      *     SearchableExposedDropdownMenu(
-     *         items = warehouses.map { it.value },
-     *         displayText = { warehouse ->
+     *         items = suppliers.map { it.value },
+     *         displayText = { supplier ->
      *             // Fast O(1) lookup of pre-computed display name
-     *             warehouseDisplayNames[warehouse.id] ?: warehouse.name
+     *             supplierDisplayNames[supplier.id] ?: supplier.name
      *         }
      *     )
      * }
@@ -1790,7 +1790,7 @@ class JoinContext internal constructor() {
     /**
      * Fetches entries from another Es collection by secondary key criteria and records the query dependency.
      *
-     * This enables building nested structures (e.g., Journey → Stops → Dispatches) with automatic reactivity.
+     * This enables building nested structures (e.g., Order → Stops → Itemes) with automatic reactivity.
      * When ANY entry matching the criteria changes (added, updated, removed), the dependent entry re-evaluates.
      *
      * ## Reactivity
@@ -1804,29 +1804,29 @@ class JoinContext internal constructor() {
      * ## Example
      *
      * ```kotlin
-     * val journeys = Data.journeys.asSnapshotStateListWithJoins<JourneyWithStops>(
-     *     entryComparator = compareBy { it.value.journey.startTime },
+     * val orders = Data.orders.asSnapshotStateListWithJoins<OrderWithStops>(
+     *     entryComparator = compareBy { it.value.order.startTime },
      *     filterMap = remember(filters...) {
-     *         { journeyEntry, context ->
-     *             val journey = journeyEntry.value
+     *         { orderEntry, context ->
+     *             val order = orderEntry.value
      *
-     *             // Fetch all dispatches for this journey with automatic dependency tracking
-     *             val dispatches = context.fetchBy(
-     *                 Data.dispatches,
-     *                 DispatchDto::journeyId.name to journey.id
+     *             // Fetch all orderItems for this order with automatic dependency tracking
+     *             val orderItems = context.fetchBy(
+     *                 Data.orderItems,
+     *                 ItemDto::orderId.name to order.id
      *             )
      *
-     *             // Group by stop (warehouse)
-     *             val stops = dispatches.groupBy { it.value.warehouseId }
+     *             // Group by stop (supplier)
+     *             val orders = orderItems.groupBy { it.value.supplierId }
      *
-     *             JourneyWithStops(journey, stops)
+     *             OrderWithStops(order, orders)
      *         }
      *     }
      * )
      *
-     * // When dispatch #456 is added/updated/removed:
-     * // → Only journeys that have a query dependency on "journeyId == X" re-evaluate
-     * // → If dispatch #456 belongs to journey #123, only journey #123 re-evaluates
+     * // When item #456 is added/updated/removed:
+     * // → Only orders that have a query dependency on "orderId == X" re-evaluate
+     * // → If item #456 belongs to order #123, only order #123 re-evaluates
      * ```
      *
      * ## Performance
@@ -1869,7 +1869,7 @@ class JoinContext internal constructor() {
  * - queryDeps: List<(primaryKey, QueryDependency)>  (for query dependencies)
  *
  * **Thread Safety**: This class uses Mutex for proper synchronization, making it safe
- * to use from any dispatcher (Dispatchers.Main, Default, IO, etc.). All public methods
+ * to use from any itemer (Itemers.Main, Default, IO, etc.). All public methods
  * are suspend functions to enable non-blocking synchronization.
  */
 internal class JoinDependencyTracker<PK : Any> {
@@ -2255,23 +2255,23 @@ private fun <K : Any, V : Any> handleRemoveInSortedList(
  *
  * ```kotlin
  * @Composable
- * fun WarehouseCard(warehouse: WarehouseDto) {
+ * fun SupplierCard(supplier: SupplierDto) {
  *     val locale = Locale.current
  *     val theme = MaterialTheme.colorScheme
  *
  *     // Simple property access
- *     val formattedName by rememberTransformed(warehouse) {
+ *     val formattedName by rememberTransformed(supplier) {
  *         it.name.uppercase()
  *     }
  *
  *     // Captured state reacts automatically — `locale` is tracked by the
  *     // OkTopoi compiler plugin and keyed into remember.
- *     val localizedName by rememberTransformed(warehouse) {
+ *     val localizedName by rememberTransformed(supplier) {
  *         it.name.uppercase(locale)
  *     }
  *
  *     // Combining multiple properties
- *     val summary by rememberTransformed(warehouse) {
+ *     val summary by rememberTransformed(supplier) {
  *         "${it.name} (${it.partner.company})"
  *     }
  *
@@ -2333,36 +2333,36 @@ fun <T, R> rememberTransformed(
  *
  * ```kotlin
  * @Composable
- * fun WarehouseCard(warehouse: WarehouseDto) {
+ * fun SupplierCard(supplier: SupplierDto) {
  *     // Call suspend extension function
- *     val displayName by rememberSuspendTransformed(warehouse) {
+ *     val displayName by rememberSuspendTransformed(supplier) {
  *         it.getDisplayName()  // suspend function
  *     }
  *
  *     // Fetch related data
- *     val partnerName by rememberSuspendTransformed(warehouse) {
+ *     val partnerName by rememberSuspendTransformed(supplier) {
  *         val partner = Data.partners.get(it.partnerId)
  *         partner?.company ?: "Unknown"
  *     }
  *
  *     // Complex async computation
- *     val shellInfo by rememberSuspendTransformed(warehouse) {
- *         warehouse.externalId?.let { stationId ->
+ *     val shellInfo by rememberSuspendTransformed(supplier) {
+ *         supplier.externalId?.let { stationId ->
  *             val station = Data.shellStations.get(stationId)
  *             station?.let { "${it.name} - ${it.city}" }
  *         }
  *     }
  *
- *     Text(displayName ?: warehouse.name)
+ *     Text(displayName ?: supplier.name)
  *     Text(partnerName)
  * }
  *
  * // Captured reactive state is tracked automatically
  * @Composable
- * fun JourneyProgress(journey: JourneyDto, refresh: Boolean) {
+ * fun OrderProgress(order: OrderDto, refresh: Boolean) {
  *     // `refresh` is captured by the lambda — the plugin keys remember on it,
  *     // so flipping it re-runs the transform.
- *     val progress by rememberSuspendTransformed(journey) {
+ *     val progress by rememberSuspendTransformed(order) {
  *         if (refresh) it.computeProgress() else it.cachedProgress()
  *     }
  *
