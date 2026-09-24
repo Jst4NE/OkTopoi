@@ -57,9 +57,11 @@ internal data class SnapshotHeader(
  *
  * ## Persistence Strategy
  *
- * - **File-per-entry**: Each key-value pair stored in separate file named by serialized key
- * - **Directory structure**: `{rootDir}/{className}/{propertyName}/{serializedKey}.json`
- * - **Atomic operations**: Individual file writes are atomic when supported by filesystem
+ * - **File-per-entry**: Each key-value pair stored in a separate file named after the key
+ *   (string keys raw, other keys as JSON; filesystem-unsafe characters percent-escaped)
+ * - **Directory structure**: `{rootDir}/{simple class name}/{propertyName}/{key}`
+ * - **In-place writes**: entry files are overwritten in place, so a crash mid-write can leave
+ *   one truncated; it is archived on the next load. Only snapshot compaction writes atomically.
  * - **Lazy loading**: Files are loaded during setup(), not on-demand
  * - **Synchronous I/O**: All file operations performed synchronously using runBlockingMultiplatform
  *
@@ -90,10 +92,10 @@ internal data class SnapshotHeader(
  *
  * ```
  * /app/data/
- *   └── com.example.UserRepository/
+ *   └── UserRepository/
  *       └── employees/
- *           ├── \"emp001\".json    # Employee with ID emp001
- *           ├── \"emp002\".json    # Employee with ID emp002
+ *           ├── emp001    # Employee with ID emp001
+ *           ├── emp002    # Employee with ID emp002
  *           └── ...
  * ```
  *

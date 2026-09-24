@@ -47,7 +47,8 @@ import kotlinx.coroutines.SupervisorJob
  *
  * - **Write-through**: State changes block the caller until file writes complete using runBlockingMultiplatform
  * - **Read-on-startup**: Persisted values loaded during setup() initialization
- * - **Atomic operations**: File operations are performed atomically when possible
+ * - **In-place writes**: the file is overwritten in place, so a crash mid-write can leave it
+ *   truncated; it is archived on the next load and the default is used.
  * - **Synchronous I/O**: All file operations block until completion for consistency
  *
  * ## Usage Examples
