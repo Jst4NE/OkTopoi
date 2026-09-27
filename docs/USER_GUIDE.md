@@ -561,7 +561,7 @@ whole — there is no field-level merge. For `esps`:
 
 - no local edit pending → the incoming change is applied;
 - a pending local edit at least as new → the incoming change is ignored, and the local edit
-  stays queued to be sent;
+  stays queued to be sent (a pending deletion counts as an edit made when it was deleted);
 - an incoming change newer than the pending local edit → the incoming change is applied **and
   the local edit is discarded without being sent.**
 
@@ -570,11 +570,20 @@ Local edits are stamped with the device clock; incoming timestamps are whatever 
 outcome. This model fits data with one writer per entry; if two clients can edit the same entry
 concurrently, resolve that in your adapter or on the server.
 
+Your own writes are judged by value, not by timestamp. When `outgoingSync` returns, the entry is
+marked synced only if it still holds the value that was sent; if it was edited while the write was
+in flight, the newer edit stays queued. If your backend returns the stored row (for example with
+server-computed fields), apply it with `fromSyncIfUnchanged(key, sent, value, timestamp)` from
+inside `outgoingSync` rather than `fromSync`: it applies only while the entry still holds `sent`,
+so clock skew can neither discard the response nor let it overwrite a newer edit.
+
 A write that fails with an error your `isSyncErrorRetryable` classifies as non-retryable is a
 separate case (by default every error is retried): the entry is rolled back
 to its last confirmed value (or removed, if it was never confirmed), the failed write is archived
 under `.oktopoi-sync-errors/`, and the protected `onSyncErrorArchived` hook fires so a subclass
-can surface it.
+can surface it. The same by-value rule applies: if the entry was edited again while the rejected
+write was in flight, nothing is rolled back — the newer edit gets its own attempt — and only the
+archive record is written.
 
 ## Startup Compaction (large collections on slow IO)
 

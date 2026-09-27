@@ -23,7 +23,9 @@ import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
+import kotlin.math.absoluteValue
 import kotlin.time.Clock
+import kotlin.time.Duration
 import kotlin.time.ExperimentalTime
 
 @Serializable
@@ -45,16 +47,20 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
 
     private val log = Logger.withTag(this::class.simpleName.toString())
 
-    private var syncTimestamp: Long = 0L // Current sync timestamp (0 = synced, >0 = needs sync)
+    // 0 = synced, >0 = unsynced local set (device time), <0 = unsynced local clear (negated device time).
+    // Guarded by [lock], which also covers every local change and its persistence, so a change and
+    // the outbound check-and-settle can never interleave.
+    private var syncTimestamp: Long = 0L
     private val syncTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1) // Triggers sync flow
-    private val lock = SynchronizedObject() // For sync metadata access
-    
+    private val lock = SynchronizedObject() // Reentrant: setters nest through Ep/E into encodeValue
+
     // Sync parameters - initialized in constructor
     private val incomingSync: Flow<Triple<String, ValueType?, Long>>
     private val outgoingSync: suspend (String, ValueType?, Long) -> Unit
     private val syncActive: Flow<Boolean>
+    private val syncInterval: Duration
     private var syncScope: CoroutineScope
-    
+
     // Track sync jobs for cancellation and restart
     private var inboundJob: Job? = null
     private var outboundJob: Job? = null
@@ -66,12 +72,14 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
         incomingSync: Flow<Triple<String, ValueType?, Long>>,
         outgoingSync: suspend (String, ValueType?, Long) -> Unit,
         syncActive: Flow<Boolean> = MutableStateFlow(true),
-        syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher)
+        syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher),
+        syncInterval: Duration = OkTopoiConstants.DEFAULT_SYNC_INTERVAL
     ) : super(persisted, observing, defaultValue) {
         this.incomingSync = incomingSync
         this.outgoingSync = outgoingSync
         this.syncActive = syncActive
         this.syncScope = syncScope
+        this.syncInterval = syncInterval
     }
 
     override fun setup() {
@@ -82,36 +90,52 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
         // Start sync operations after persistence is initialized
         startSyncOperations()
     }
-    
+
     private fun startSyncOperations() {
         // Set up inbound sync (only when active)
-        inboundJob = syncScope.launch { 
+        inboundJob = syncScope.launch {
             syncActive
                 .flatMapLatest { active -> if (active) incomingSync else emptyFlow() }
                 .collect { (propertyId, value, timestamp) -> fromSync(value, timestamp) }
         }
 
-        // Set up outbound sync: periodic sync of unsynced data
+        // Outbound: same cadence semantics as Esps — INFINITE = disabled, ZERO = on change only,
+        // >0 = on change plus a periodic retry.
+        if (syncInterval == Duration.INFINITE) return
         outboundJob = syncScope.launch {
             syncActive
                 .flatMapLatest { active ->
                     if (active) {
-                        kotlinx.coroutines.flow
-                            .merge(syncTrigger, flow { while (true) { delay(OkTopoiConstants.DEFAULT_SYNC_INTERVAL); emit(Unit) } })
-                            .onStart { emit(Unit) }
+                        val triggerFlow = if (syncInterval > Duration.ZERO) {
+                            kotlinx.coroutines.flow
+                                .merge(syncTrigger, flow { while (true) { delay(syncInterval); emit(Unit) } })
+                        } else {
+                            syncTrigger
+                        }
+                        triggerFlow.onStart { emit(Unit) }
                     } else {
                         emptyFlow()
                     }
                 }
                 .collect {
-                    getEntryToSync()?.let { (propertyId, value, timestamp) ->
+                    getEntryToSync()?.let { (propertyId, sent, timestamp) ->
                         try {
-                            outgoingSync(propertyId, value, timestamp)
-                            synchronized(lock) {
-                                syncTimestamp = 0L // Mark as synced
+                            outgoingSync(propertyId, sent, timestamp)
+                            // Settle only if nothing changed while the write was in flight: same value
+                            // and same kind of change (set vs clear). Otherwise the newer change stays
+                            // pending and goes out next.
+                            val stillPending = synchronized(lock) {
+                                val unchanged = syncTimestamp != 0L &&
+                                    (syncTimestamp > 0) == (timestamp > 0) &&
+                                    super.value == sent
+                                if (unchanged) {
+                                    syncTimestamp = 0L
+                                    // Persist the synced state to avoid re-sync on app restart
+                                    persistValue(super.value)
+                                }
+                                syncTimestamp != 0L
                             }
-                            // Persist the updated sync state to avoid re-sync on app restart
-                            persistValue(super.value)
+                            if (stillPending) syncTrigger.tryEmit(Unit)
                         } catch (e: Exception) {
                             Logger.e(e, tag = "OkTopoi-Esp") { "Error in outbound sync for $propertyId" }
                         }
@@ -121,28 +145,34 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
     }
 
     /**
-     * Handles incoming sync data, applying it if timestamp is newer.
+     * Handles incoming sync data, applying it if timestamp is newer than a pending local change.
      */
     @OptIn(ExperimentalTime::class)
     fun fromSync(value: ValueType?, timestamp: Long, force: Boolean = false): Boolean {
         return synchronized(lock) {
-            val currentTimestamp = syncTimestamp
-            
+            // Compare against when the pending change happened; a pending clear is stored negated.
+            val currentTimestamp = syncTimestamp.absoluteValue
+
             // Check if we should update based on timestamp
             if (!force && timestamp <= currentTimestamp) {
                 return@synchronized false
             }
-            
-            // Update the value without triggering additional sync
-            if (value != null) {
-                super.value = value
-            } else {
-                super.value = defaultValue?.invoke() ?: null as ValueType
-            }
-            
-            // Update sync timestamp
+
+            // Sync state first, so the value's single persistence write already records it.
+            val previous = syncTimestamp
             syncTimestamp = if (timestamp > 0) 0L else timestamp // Mark as synced if positive timestamp
-            
+            try {
+                // Update the value without triggering additional sync
+                if (value != null) {
+                    super.value = value
+                } else {
+                    super.value = defaultValue?.invoke() ?: null as ValueType
+                }
+            } catch (e: Throwable) {
+                syncTimestamp = previous
+                throw e
+            }
+
             return@synchronized true
         }
     }
@@ -160,67 +190,68 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
             }
         }
     }
-    
+
     /**
-     * Marks the current value for sync with current timestamp.
+     * Applies a local change as pending sync. The timestamp is stamped BEFORE [change] runs, so the
+     * persistence write the change performs (Ep writes on every set) already records the pending
+     * state — stamping after it would leave a file that reloads as synced if the process dies before
+     * the outbound write. Restored if the change fails or reports no change ([applied] false).
      */
-    private fun markForSync() {
-        synchronized(lock) {
-            syncTimestamp = Clock.System.now().toEpochMilliseconds()
+    private fun <R> changeLocally(
+        timestamp: Long = Clock.System.now().toEpochMilliseconds(),
+        applied: (R) -> Boolean = { true },
+        change: () -> R
+    ): R {
+        val result = synchronized(lock) {
+            val previous = syncTimestamp
+            syncTimestamp = timestamp
+            val r = try {
+                change()
+            } catch (e: Throwable) {
+                syncTimestamp = previous
+                throw e
+            }
+            if (!applied(r)) syncTimestamp = previous
+            r
         }
-        syncTrigger.tryEmit(Unit)
+        if (applied(result)) syncTrigger.tryEmit(Unit)
+        return result
     }
 
-    // Override all state-changing methods to add sync tracking
-    
+    // Override all state-changing methods to add sync tracking. The convenience variants route
+    // through the value setter (E's set/clear already do, virtually), so each change is stamped and
+    // persisted exactly once.
+
     override var value: ValueType
         get() = super.value
         set(value) {
-            super.value = value
-            markForSync()
+            changeLocally { super.value = value }
         }
 
     override suspend fun emit(value: ValueType) {
-        super.emit(value)
-        markForSync()
+        this.value = value
     }
 
     override fun tryEmit(value: ValueType): Boolean {
-        val result = super.tryEmit(value)
-        if (result) {
-            markForSync()
-        }
-        return result
+        this.value = value
+        return true
     }
 
-    override fun compareAndSet(expect: ValueType, update: ValueType): Boolean {
-        val result = super.compareAndSet(expect, update)
-        if (result) {
-            markForSync()
-        }
-        return result
-    }
+    override fun compareAndSet(expect: ValueType, update: ValueType): Boolean =
+        changeLocally(applied = { it }) { super.compareAndSet(expect, update) }
 
     override fun set(newValue: ValueType) {
-        super.set(newValue)
-        markForSync()
+        value = newValue
     }
 
-    override fun setIfDifferent(newValue: ValueType): Boolean {
-        val result = super.setIfDifferent(newValue)
-        if (result) {
-            markForSync()
-        }
-        return result
-    }
+    // setIfDifferent is inherited: E implements it via compareAndSet, which is overridden above.
 
     override fun clear() {
-        super.clear()
-        markForSync()
+        value = defaultValue?.invoke() ?: null as ValueType
     }
 
     // Override persistence methods to include sync metadata
-    
+
     override fun encodeValue(value: ValueType?): String {
         val wrappedValue = PersistedValueWithSyncEsp<ValueType?>(
             value = value,
@@ -246,26 +277,20 @@ open class Esp<ValueType : Any?> : Ep<ValueType> {
     /**
      * Sync-enabled methods for manual sync operations
      */
-    
-    fun putSync(newValue: ValueType): ValueType? {
-        synchronized(lock) {
+
+    fun putSync(newValue: ValueType): ValueType? =
+        changeLocally {
             val oldValue = super.value
             super.value = newValue
-            syncTimestamp = Clock.System.now().toEpochMilliseconds()
-            syncTrigger.tryEmit(Unit)
-            return oldValue
+            oldValue
         }
-    }
 
-    fun clearSync(): ValueType? {
-        synchronized(lock) {
+    fun clearSync(): ValueType? =
+        changeLocally(timestamp = -Clock.System.now().toEpochMilliseconds()) { // Negative for deletion
             val oldValue = super.value
-            value = defaultValue!!.invoke()!!
-            syncTimestamp = -Clock.System.now().toEpochMilliseconds() // Negative for deletion
-            syncTrigger.tryEmit(Unit)
-            return oldValue
+            super.value = defaultValue!!.invoke()!!
+            oldValue
         }
-    }
 
     /**
      * Check if sync operations are currently active.

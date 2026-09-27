@@ -730,6 +730,7 @@ inline fun <reified ValueType : Any?> esp(
     noinline outgoingSync: suspend (String, ValueType?, Long) -> Unit,
     syncActive: Flow<Boolean> = MutableStateFlow(true),
     syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher),
+    syncInterval: Duration = OkTopoiConstants.DEFAULT_SYNC_INTERVAL,
     noinline defaultValue: (() -> ValueType?)? = null
 ): Esp<ValueType> {
     return Esp(
@@ -743,6 +744,7 @@ inline fun <reified ValueType : Any?> esp(
         incomingSync = incomingSync,
         outgoingSync = outgoingSync,
         syncActive = syncActive,
+        syncInterval = syncInterval,
         syncScope = syncScope
     )
 }
@@ -796,6 +798,7 @@ inline fun <reified ValueType : Any> esp(
     noinline outgoingSync: suspend (String, ValueType?, Long) -> Unit,
     syncActive: Flow<Boolean> = MutableStateFlow(true),
     syncScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher),
+    syncInterval: Duration = OkTopoiConstants.DEFAULT_SYNC_INTERVAL,
     noinline defaultValue: () -> ValueType
 ): Esp<ValueType> {
     return Esp(
@@ -809,6 +812,7 @@ inline fun <reified ValueType : Any> esp(
         incomingSync = incomingSync,
         outgoingSync = outgoingSync,
         syncActive = syncActive,
+        syncInterval = syncInterval,
         syncScope = syncScope
     )
 }
@@ -821,7 +825,8 @@ inline fun <reified ValueType : Any?> CoroutineScope.esp(
     noinline defaultValue: (() -> ValueType?)? = null,
     incomingSync: Flow<Triple<String, ValueType?, Long>>,
     noinline outgoingSync: suspend (String, ValueType?, Long) -> Unit,
-    syncActive: Flow<Boolean> = MutableStateFlow(true)
+    syncActive: Flow<Boolean> = MutableStateFlow(true),
+    syncInterval: Duration = OkTopoiConstants.DEFAULT_SYNC_INTERVAL
 ): Esp<ValueType> {
     return Esp(
         persisted = PersistedEInfo(
@@ -834,6 +839,7 @@ inline fun <reified ValueType : Any?> CoroutineScope.esp(
         incomingSync = incomingSync,
         outgoingSync = outgoingSync,
         syncActive = syncActive,
+        syncInterval = syncInterval,
         syncScope = this
     )
 }

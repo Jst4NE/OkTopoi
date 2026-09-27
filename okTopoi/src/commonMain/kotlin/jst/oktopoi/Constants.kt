@@ -32,33 +32,12 @@ object OkTopoiConstants {
     const val DEFAULT_CHANGE_FLOW_BUFFER_SIZE = 2048
     
     /**
-     * Default sync interval for Esp/Esps periodic synchronization.
-     * Syncing occurs on data changes AND at this periodic interval.
+     * Default outbound sync cadence for Esp/Esps (their `syncInterval` parameter).
      *
-     * This interval ensures that unsynced changes are eventually synchronized
-     * even if immediate sync attempts fail. The sync system uses both:
-     * - Immediate sync on data changes (for low latency)
-     * - Periodic sync at this interval (for reliability)
-     *
-     * ```kotlin
-     * // Sync behavior example:
-     * val syncedData = esp<UserSettings>(
-     *     defaultValue = { UserSettings.default() },
-     *     incomingSync = incomingChanges,
-     *     outgoingSync = { key, value, timestamp ->
-     *         sendToRemote(key, value, timestamp)
-     *     }
-     * )
-     *
-     * syncedData.value = newSettings  // Immediate sync attempt
-     * // + Periodic sync every 90 seconds as backup
-     * ```
-     *
-     * Adjust this value based on your sync requirements:
-     * - Duration.ZERO: Immediate sync on every change (no periodic timer)
-     * - Lower values: More frequent sync, higher network/CPU usage
-     * - Higher values: Less frequent sync, potential for data staleness
-     * - Duration.INFINITE: Automatic outward sync disabled entirely
+     * - `Duration.ZERO` (the default): sync on every local change only — no timer. A write that
+     *   fails with a retryable error waits for the next change or for `syncActive` to turn on again.
+     * - `> 0`: sync on every change, plus a periodic retry at this interval.
+     * - `Duration.INFINITE`: outbound sync disabled entirely.
      */
     val DEFAULT_SYNC_INTERVAL: Duration = Duration.ZERO
     

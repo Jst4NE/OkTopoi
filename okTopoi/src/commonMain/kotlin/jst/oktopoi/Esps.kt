@@ -32,6 +32,7 @@ import kotlinx.io.buffered
 import kotlinx.io.files.Path
 import kotlinx.io.writeString
 import kotlin.time.Duration
+import kotlin.math.absoluteValue
 
 /**
  * Internal wrapper for persisted values that includes synchronization timestamp.
@@ -95,10 +96,13 @@ class TypedSyncDependency<ThisValueType, DepKeyType : Any, DepValueType : Any>(
     override suspend fun syncDependencyIfNeeded(value: ThisValueType, syncingStack: Set<Pair<Any, Any>>) {
         val depKey = keyExtractor(value) ?: return  // No FK or null FK - no dependency
 
-        // Check if dependency is already synced (not in unsyncedKeysMap or timestamp is 0)
+        // Only a pending upsert (timestamp > 0) of the parent must reach the server first. Nothing
+        // pending: already there. A pending DELETE (timestamp < 0): sending it first would remove the
+        // very row this child is about to reference and guarantee its FK failure — leave the parent
+        // alone and let the server arbitrate the child write against the parent it still holds.
         val depTimestamp = dependsOn.getUnsyncedTimestamp(depKey)
-        if (depTimestamp == null || depTimestamp == 0L) {
-            return  // Already synced, nothing to do
+        if (depTimestamp == null || depTimestamp <= 0L) {
+            return
         }
 
         // Circular dependency detection
@@ -109,7 +113,7 @@ class TypedSyncDependency<ThisValueType, DepKeyType : Any, DepValueType : Any>(
 
         // Get dependency value using suspend API (prevents runBlocking in suspend context)
         val depValue = dependsOn.get(depKey)
-        if (depValue == null && depTimestamp > 0) {
+        if (depValue == null) {
             // Data integrity issue - FK points to non-existent entry
             log.w { "Dependency $depKey not found in ${dependsOn.propertyName} (referenced but missing)" }
             return
@@ -368,7 +372,9 @@ override fun fromPersistString(string: String, fileName: String) {
             // where the current value IS the old value) — getUnsafe is only safe under the lock.
             oldValue = getUnsafe(key)
 
-            val currentTimestamp = unsyncedKeysMap[key]?.timestamp ?: 0L
+            // Pending deletes are stored negated; compare against when the pending edit happened,
+            // whichever kind it is — raw, every incoming version would beat a pending delete.
+            val currentTimestamp = unsyncedKeysMap[key]?.timestamp?.absoluteValue ?: 0L
 
             log.d { "[${this@Esps.callingClassName}.${this@Esps.propertyName}] currentTimestamp: $currentTimestamp; incomingTimestamp: $timestamp" }
 
@@ -376,25 +382,61 @@ override fun fromPersistString(string: String, fileName: String) {
                 return@withWriteLock false
             }
 
-            // Ensure persistence sees synced state (0) for this key
-            unsyncedKeysMap.remove(key)
-
-            // Suppress outbound marking during inbound apply
-            inboundSuppressionDepth++
-            try {
-                if (value != null) {
-                    putUnsafe(key, value)
-                } else {
-                    removeUnsafe(key)
-                }
-            } finally {
-                inboundSuppressionDepth--
-            }
+            applySyncedUnsafe(key, value)
             true
         }
 
         onAfterFromSync(key, oldValue, value, timestamp, synced)
         return synced
+    }
+
+    /**
+     * Applies the remote result of this store's OWN write — e.g. the row a server returns for an
+     * upsert, carrying server-computed fields — but only if the entry still holds [sent], the value
+     * that write carried. Call it from inside `outgoingSync`, before it returns.
+     *
+     * Deliberately not timestamp-based like [fromSync]: the response describes [sent], not a
+     * concurrent foreign edit, so whether it is "newer" than a local edit made while the write was in
+     * flight says nothing — comparing the server's clock with the device's would let the response
+     * silently overwrite that newer edit. If the entry has moved on, the response is dropped and the
+     * newer local state stays pending; it will be written next and bring back its own response.
+     *
+     * When applied, the entry settles as synced (the server holds exactly this value) and
+     * [onAfterFromSync] fires as for [fromSync].
+     *
+     * @return true if applied, false if the entry no longer held [sent]
+     */
+    suspend fun fromSyncIfUnchanged(key: KeyType, sent: ValueType?, value: ValueType?, timestamp: Long): Boolean {
+        onBeforeFromSync(key, value, timestamp, false)
+
+        var oldValue: ValueType? = null
+        val synced = withWriteLock {
+            oldValue = getUnsafe(key)
+            if (oldValue != sent) return@withWriteLock false
+            applySyncedUnsafe(key, value)
+            true
+        }
+
+        onAfterFromSync(key, oldValue, value, timestamp, synced)
+        return synced
+    }
+
+    /** Applies [value] as server-confirmed state: clears any pending outbound mark. Caller holds the write lock. */
+    private fun applySyncedUnsafe(key: KeyType, value: ValueType?) {
+        // Ensure persistence sees synced state (0) for this key
+        unsyncedKeysMap.remove(key)
+
+        // Suppress outbound marking during inbound apply
+        inboundSuppressionDepth++
+        try {
+            if (value != null) {
+                putUnsafe(key, value)
+            } else {
+                removeUnsafe(key)
+            }
+        } finally {
+            inboundSuppressionDepth--
+        }
     }
 
     /**
@@ -553,14 +595,38 @@ override fun fromPersistString(string: String, fileName: String) {
             // All dependencies synced, now sync this entry
             outgoingSync(key, value, timestamp)
 
-            // Mark as synced on success and persist the updated sync state
-            withWriteLock {
-                unsyncedKeysMap.remove(key)
-                // Persist the entry with syncTimestamp=0 to avoid re-sync on app restart
-                // For deletions: this[key] is null, so persistEntry will delete the tombstone file
-                // For upserts: this[key] still exists, so persistEntry will write syncTimestamp=0
-                // Use getUnsafe to avoid deadlock (we're already holding write lock)
-                persistEntry(key, value)
+            // The server now holds `value`. Settle the entry only if it still holds that value:
+            // the user may have edited or deleted it while the write was in flight, and that newer
+            // state must stay pending rather than be marked synced unsent. Compared by value, not
+            // by timestamp — two edits in one millisecond share a timestamp, and an entry edited
+            // back to what was sent genuinely needs nothing more.
+            val superseded = withWriteLock {
+                val pending = unsyncedKeysMap[key]
+                val current = getUnsafe(key)
+                when {
+                    // Already settled while the write was in flight (fromSync applied a remote
+                    // version, or fromSyncIfUnchanged applied this write's own response) — memory
+                    // and disk were written together by that apply; nothing to do.
+                    pending == null -> false
+                    current == value -> {
+                        unsyncedKeysMap.remove(key)
+                        // Persist with syncTimestamp=0 so the entry is not re-sent after a restart.
+                        // For deletions current is null, so persistEntry deletes the pending-delete file.
+                        persistEntry(key, current)
+                        false
+                    }
+                    else -> {
+                        // Newer local state stays pending. Its rollback target becomes `value` — what
+                        // the server holds now (null after a delete: no server row to roll back to).
+                        unsyncedKeysMap[key] = pending.copy(lastSyncedValue = value)
+                        persistEntry(key, current)
+                        true
+                    }
+                }
+            }
+            if (superseded) {
+                log.d { "${propertyName}[$key] changed while its write was in flight — newer state stays pending" }
+                syncTrigger.tryEmit(Unit)
             }
             // Notify reactive sync-state flows: Es.changes does not fire here because the
             // underlying TreeMap value is unchanged — only unsyncedKeysMap shrank.
@@ -601,9 +667,20 @@ override fun fromPersistString(string: String, fileName: String) {
      *
      * In both cases, the failed value and error details are archived under .oktopoi-sync-errors/
      * for inspection, and [onSyncErrorArchived] is invoked so subclasses can surface the failure.
+     *
+     * If the entry no longer holds the rejected value (changed while the write was in flight), none
+     * of that happens: the newer state is left pending for its own attempt, and only the archive
+     * record is written. [onSyncErrorArchived] does not fire — nothing was rolled back.
      */
     private fun archiveSyncError(key: KeyType, value: ValueType?, error: Exception) {
-        val (syncTimestamp, rolledBackTo) = withWriteLockBlocking {
+        val outcome = withWriteLockBlocking {
+            // 0. The rejection is of `value`. If the entry no longer holds it — edited again while
+            //    the write was in flight, or already overwritten by a remote version — rolling back
+            //    would destroy state that was never tried (or remove a row the server still holds).
+            //    Leave it alone: newer local state is still pending and gets its own attempt, which
+            //    surfaces its own failure if it is rejected too. Checked under the same lock as the
+            //    rollback, so no edit can slip in between.
+            if (getUnsafe(key) != value) return@withWriteLockBlocking null
             // 1. Capture sync state before mutation
             val entry = unsyncedKeysMap[key]
             val ts = entry?.timestamp ?: 0L
@@ -623,6 +700,17 @@ override fun fromPersistString(string: String, fileName: String) {
             ts to lastSyncedValue
         }
 
+        if (outcome == null) {
+            Logger.w(tag = "ESPS") {
+                "Non-retryable sync error for ${propertyName}[$key], but the entry changed since that write - " +
+                    "keeping the newer state, archiving the failed write only: ${error.message}"
+            }
+            writeSyncErrorArchive(key, value, 0L, error)
+            syncTrigger.tryEmit(Unit)
+            return
+        }
+        val (syncTimestamp, rolledBackTo) = outcome
+
         if (rolledBackTo != null) {
             // Persist the rolled-back value as synced (syncTimestamp=0, no lastSyncedValue)
             try { persistEntry(key, rolledBackTo) } catch (_: Exception) {}
@@ -631,7 +719,27 @@ override fun fromPersistString(string: String, fileName: String) {
             }
         }
 
-        // 4. Archive the persisted file + write error metadata
+        // 4. Archive the failed write + error metadata
+        writeSyncErrorArchive(key, value, syncTimestamp, error)
+
+        // 5. Delete the original persisted file (only if we didn't roll back —
+        //    rollback already overwrote it with the synced value via persistEntry above)
+        if (rolledBackTo == null) {
+            try { deleteFromFile(key) } catch (_: Exception) {}
+        }
+
+        // 6. Notify subclasses so the failure can be surfaced to the user
+        try {
+            onSyncErrorArchived(key, value, error, rolledBackTo != null)
+        } catch (hookError: Exception) {
+            Logger.e(hookError, tag = "OkTopoi-Esps") {
+                "onSyncErrorArchived hook failed for ${propertyName}[$key]"
+            }
+        }
+    }
+
+    /** Writes the failed write and its error under `.oktopoi-sync-errors/` for inspection. Best effort. */
+    private fun writeSyncErrorArchive(key: KeyType, value: ValueType?, syncTimestamp: Long, error: Exception) {
         try {
             val rootDir = dirPath.parent!!.parent!!  // dirPath = rootDir/className/propertyName
             val errorDir = Path(rootDir, ".oktopoi-sync-errors")
@@ -669,21 +777,6 @@ override fun fromPersistString(string: String, fileName: String) {
         } catch (archiveError: Exception) {
             Logger.e(archiveError, tag = "OkTopoi-SyncErrorArchive") {
                 "Failed to archive sync error for ${propertyName}[$key]"
-            }
-        }
-
-        // 5. Delete the original persisted file (only if we didn't roll back —
-        //    rollback already overwrote it with the synced value via persistEntry above)
-        if (rolledBackTo == null) {
-            try { deleteFromFile(key) } catch (_: Exception) {}
-        }
-
-        // 6. Notify subclasses so the failure can be surfaced to the user
-        try {
-            onSyncErrorArchived(key, value, error, rolledBackTo != null)
-        } catch (hookError: Exception) {
-            Logger.e(hookError, tag = "OkTopoi-Esps") {
-                "onSyncErrorArchived hook failed for ${propertyName}[$key]"
             }
         }
     }
