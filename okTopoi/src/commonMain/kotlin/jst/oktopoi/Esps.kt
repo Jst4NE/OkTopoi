@@ -303,8 +303,13 @@ override fun fromPersistString(string: String, fileName: String) {
         // Persistence and sync marking are suppressed via persistenceLoadDepth.
 //        log.v { "[fromPersistString]\n key: $key;\n value: ${combined.value};\n syncTime: ${combined.syncTimestamp}\n" }
 
+        // Loaded in order snapshot → tombstones → entry files, so a later source's sync state is
+        // authoritative: an entry file saying "synced" must also clear a pending state the snapshot
+        // registered earlier — left behind, a stale pending delete would be sent for a live row.
         if (combined.syncTimestamp != 0L) {
             unsyncedKeysMap[key] = UnsyncedEntry(combined.syncTimestamp, combined.lastSyncedValue)
+        } else {
+            unsyncedKeysMap.remove(key)
         }
         
         // Only restore to TreeMap if not deleted (value exists and timestamp >= 0)
@@ -902,6 +907,10 @@ override fun fromPersistString(string: String, fileName: String) {
     }
 
     override fun onBeforeRemoveUnsafe(key: KeyType) {
+        // During load the only removals are tombstones, and a tombstone is written only for a
+        // deletion with no pending sync state (a pending delete persists as an entry file instead).
+        // So it also clears any pending state the snapshot registered for the key.
+        if (persistenceLoadDepth > 0) unsyncedKeysMap.remove(key)
         if (syncInterval != Duration.INFINITE && inboundSuppressionDepth == 0 && persistenceLoadDepth == 0) {
             val ts = -Clock.System.now().toEpochMilliseconds()
             val existing = unsyncedKeysMap[key]

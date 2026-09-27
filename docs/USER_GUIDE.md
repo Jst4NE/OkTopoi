@@ -592,8 +592,9 @@ archive record is written.
 To address this, OkTopoi maintains an optional compacted `_snapshot.bin` file alongside the per-entry files. On startup, loading proceeds in three phases:
 
 1. Read `_snapshot.bin` if present (one sequential read).
-2. Apply per-entry files written since the snapshot (they override snapshot entries).
-3. Apply tombstones (`.tomb` files) for deletions made after the snapshot.
+2. Apply tombstones (`.tomb` files) for deletions made after the snapshot.
+3. Apply per-entry files written since the snapshot (they override snapshot entries, and win over
+   a tombstone: both exist only when a key was written again after its deletion).
 
 Per-entry files and tombstones accumulate during normal operation; compaction folds them back into a fresh snapshot so the next startup reads a single file.
 
@@ -611,7 +612,13 @@ suspend fun onShutdown() {
 }
 ```
 
-`compact()` holds the write lock for its duration. Crash-safe: a partial compaction simply means the next load reads both the snapshot and the leftover per-entry files, which produces the same final state.
+`compact()` holds the write lock for its duration. It is safe against the process dying at any
+point. The new snapshot replaces the old one in a single atomic rename, so there is always exactly
+one snapshot. Leftover files are then removed tombstones-first, so a partial cleanup still loads to
+the same state. If the compaction itself fails, everything is left as it was. It is **not** proof
+against power loss: nothing is fsynced, so an OS crash right after compaction can in theory leave a
+truncated snapshot, which is archived on the next load (entries only it held are lost). On Android
+the atomic rename needs API 26, which is OkTopoi's `minSdk`.
 
 ### Disk layout
 

@@ -185,7 +185,26 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
                         loadSnapshot(snapshotPath, rootDir)
                     }
 
-                    // Phase 2: apply diff — per-entry files written since last compaction
+                    // Phase 2: apply tombstones — deletions that happened after the snapshot.
+                    // BEFORE the entry files, not after: an entry file and a tombstone for the same
+                    // key coexist only when the key was written again after its deletion (a delete
+                    // removes the entry file before it writes the tombstone, and aborts if that
+                    // removal fails), so the tombstone only ever means "gone from the snapshot" and
+                    // a surviving entry file must win. Applied last, it deleted the re-written entry.
+                    val tombstoneFiles = allFiles.filter { it.name.endsWith(TOMBSTONE_SUFFIX) }
+                    tombstoneFiles.forEach { tomb ->
+                        try {
+                            val keyFileName = tomb.name.removeSuffix(TOMBSTONE_SUFFIX)
+                            val key = fileNameToKey(keyFileName)
+                            removeUnsafe(key)
+                        } catch (e: Exception) {
+                            Logger.e(e, tag = "OkTopoi-Eps") {
+                                "Failed to apply tombstone ${tomb.name} in ${callingClassName}.${propertyName}: ${e.message}"
+                            }
+                        }
+                    }
+
+                    // Phase 3: apply diff — per-entry files written since last compaction
                     // override snapshot entries (or add new ones)
                     val entryFiles = allFiles.filter { f ->
                         // Files in the reserved namespace (snapshot, snapshot tmp, sidecars) are
@@ -215,20 +234,6 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
                                 propertyIdentifier = "${callingClassName}.${propertyName}"
                             )
                             // Continue with next file
-                        }
-                    }
-
-                    // Phase 3: apply tombstones — deletions that happened after the snapshot
-                    val tombstoneFiles = allFiles.filter { it.name.endsWith(TOMBSTONE_SUFFIX) }
-                    tombstoneFiles.forEach { tomb ->
-                        try {
-                            val keyFileName = tomb.name.removeSuffix(TOMBSTONE_SUFFIX)
-                            val key = fileNameToKey(keyFileName)
-                            removeUnsafe(key)
-                        } catch (e: Exception) {
-                            Logger.e(e, tag = "OkTopoi-Eps") {
-                                "Failed to apply tombstone ${tomb.name} in ${callingClassName}.${propertyName}: ${e.message}"
-                            }
                         }
                     }
 
@@ -504,12 +509,14 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
      *
      * Workflow:
      *  1. Write a tmp snapshot containing every current entry.
-     *  2. Atomically swap tmp → `_snapshot.bin`.
-     *  3. Delete all remaining per-entry files and tombstones in the directory.
+     *  2. Atomically move tmp over `_snapshot.bin` (replacing it — never delete-then-move).
+     *  3. Delete the remaining tombstones, then the remaining per-entry files.
      *
-     * After this, the next load opens **one** file instead of N. Crash-safe: if the process dies
-     * between steps 2 and 3, the leftover per-entry files simply override snapshot entries on load,
-     * which yields the same in-memory state.
+     * After this, the next load opens **one** file instead of N. Crash-safe against the process
+     * dying at any point: before step 2 the old snapshot and loose files are intact; step 2 leaves
+     * either the old or the new snapshot, never neither; and step 3 removes tombstones first, so a
+     * partial sweep can only leave loose files that load to the same state. Not proof against power
+     * loss — nothing is fsynced.
      *
      * Call this at app shutdown, during quiet periods, or after large bulk writes. Cheap-ish for
      * tens of thousands of entries (one sequential write) but holds the write lock for its duration.
@@ -534,27 +541,49 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
             entryCount = entries.size
         )
 
-        // 1. Write tmp file
-        if (fileSystem.exists(tmpPath)) fileSystem.delete(tmpPath)
-        fileSystem.sink(tmpPath).buffered().use { sink ->
-            sink.writeString(oktopoiJson.encodeToString(SnapshotHeader.serializer(), header))
-            sink.writeString("\n")
-            entries.forEach { (fileName, content) ->
-                sink.writeString(fileName)
-                sink.writeString("\t")
-                sink.writeString(content)
+        try {
+            // 1. Write tmp file
+            if (fileSystem.exists(tmpPath)) fileSystem.delete(tmpPath)
+            fileSystem.sink(tmpPath).buffered().use { sink ->
+                sink.writeString(oktopoiJson.encodeToString(SnapshotHeader.serializer(), header))
                 sink.writeString("\n")
+                entries.forEach { (fileName, content) ->
+                    sink.writeString(fileName)
+                    sink.writeString("\t")
+                    sink.writeString(content)
+                    sink.writeString("\n")
+                }
             }
+
+            // 2. Atomic swap. atomicMove replaces an existing target in one step on every target
+            // platform (NIO ATOMIC_MOVE+REPLACE_EXISTING on JVM/Android — hence minSdk 26 — POSIX
+            // rename() on native). Deleting the old snapshot first would open a window in which
+            // neither snapshot exists and every entry living only in the old one is lost.
+            fileSystem.atomicMove(tmpPath, snapshotPath)
+        } catch (e: Exception) {
+            // Nothing is lost: the old snapshot and the loose files are untouched and still load.
+            try { if (fileSystem.exists(tmpPath)) fileSystem.delete(tmpPath) } catch (_: Exception) {}
+            throw e
         }
 
-        // 2. Atomic swap
-        if (fileSystem.exists(snapshotPath)) fileSystem.delete(snapshotPath)
-        fileSystem.atomicMove(tmpPath, snapshotPath)
-
-        // 3. Sweep stale per-entry files and tombstones. Reserved-namespace files (the snapshot
-        // itself, its tmp, and any sidecars) are preserved — they are not entries.
-        fileSystem.list(dirPath).forEach { f ->
-            if (!f.name.startsWith(RESERVED_PREFIX)) {
+        // 3. Sweep stale tombstones, THEN per-entry files. Order matters: a tombstone and an entry
+        // file for the same key mean "re-written after deletion" and load correctly together (the
+        // entry file wins), but a surviving tombstone without its entry file would delete the key
+        // from the new snapshot on the next load. Reserved-namespace files (the snapshot itself,
+        // its tmp, and any sidecars) are preserved — they are not entries.
+        val looseFiles = fileSystem.list(dirPath).filter { !it.name.startsWith(RESERVED_PREFIX) }
+        val (tombstones, entryFiles) = looseFiles.partition { it.name.endsWith(TOMBSTONE_SUFFIX) }
+        var tombstonesSwept = true
+        tombstones.forEach { f ->
+            try { fileSystem.delete(f) } catch (e: Exception) {
+                tombstonesSwept = false
+                log.w(e) { "compact: failed to delete ${f.name}" }
+            }
+        }
+        // A tombstone that could not be deleted must keep its entry file, or it would delete that
+        // key on the next load. Leftover loose files are harmless; the next compaction sweeps them.
+        if (tombstonesSwept) {
+            entryFiles.forEach { f ->
                 try { fileSystem.delete(f) } catch (e: Exception) {
                     log.w(e) { "compact: failed to delete ${f.name}" }
                 }
