@@ -21,7 +21,9 @@ import org.jetbrains.kotlin.ir.builders.irBlock
 import org.jetbrains.kotlin.ir.builders.irBoolean
 import org.jetbrains.kotlin.ir.builders.irTemporary
 import org.jetbrains.kotlin.ir.declarations.IrDeclarationOrigin
+import org.jetbrains.kotlin.ir.declarations.IrDeclarationWithName
 import org.jetbrains.kotlin.ir.declarations.IrFunction
+import org.jetbrains.kotlin.ir.declarations.IrLocalDelegatedProperty
 import org.jetbrains.kotlin.ir.declarations.IrParameterKind
 import org.jetbrains.kotlin.ir.declarations.IrSimpleFunction
 import org.jetbrains.kotlin.ir.declarations.IrValueDeclaration
@@ -62,6 +64,11 @@ import org.jetbrains.kotlin.name.Name
  * in a memoizing call at the caller's call site, **keyed on variables the argument captures
  * from its enclosing scope**. Zero-capture args fall back to unconditional "first-composition"
  * caching (previous plugin behaviour).
+ *
+ * A local delegated property (`var query by remember { mutableStateOf("") }`) is read through
+ * its getter, not a variable reference, so it is keyed on its **current value**: the getter is
+ * called at the call site. That read also subscribes the composition to the state, so a change
+ * recomposes the caller, invalidates the cache and hands the callee a new argument instance.
  *
  * Two emission paths depending on plugin ordering:
  *  - **Pre-Compose** (Compose hasn't run yet): emit `remember(vararg keys, calculation)` — Compose
@@ -128,14 +135,26 @@ class ComposeCallSiteRememberWrapper(
     /**
      * A captured value used as a cache key.
      *
+     * [decl] is either a value declaration (variable or parameter), keyed on its value, or the
+     * getter of a local delegated property declared outside the argument, keyed on what the
+     * getter returns (see [readCapture]).
+     *
      * [isVarargArray] is set when the captured declaration is an enclosing composable's `vararg`
      * parameter, whose Array identity is re-synthesized every recomposition. Such captures need
      * element-wise keying rather than identity keying (see [buildCacheBlock]).
      */
     private data class Capture(
-        val decl: IrValueDeclaration,
+        val decl: IrDeclarationWithName,
         val isVarargArray: Boolean,
     )
+
+    /** The key expression for [cap]: a read of the captured value, or a call of the getter. */
+    private fun readCapture(builder: DeclarationIrBuilder, cap: Capture): IrExpression =
+        when (val decl = cap.decl) {
+            is IrValueDeclaration -> builder.irGet(decl)
+            is IrSimpleFunction -> builder.irCall(decl.symbol)
+            else -> error("[OktopoiPlugin] Unexpected capture ${decl.name}")
+        }
 
     private fun resolveComposerSymbols(): ComposerSymbols {
         val composerClass = pluginContext.referenceClass(composerClassId)
@@ -251,7 +270,12 @@ class ComposeCallSiteRememberWrapper(
         // Two shapes qualify as "already memoized":
         //  - IrBlock     — Compose has lowered a `remember(...)` into its cache-block form.
         //  - IrCall to `androidx.compose.runtime.remember` — pre-Compose user-written memoization.
-        if (isAlreadyMemoized(arg)) return arg
+        if (isAlreadyMemoized(arg)) {
+            if (arg is IrBlock && composerParam != null) {
+                keyCacheOnDelegatedReads(enclosing, composerParam, arg)
+            }
+            return arg
+        }
 
         // Pre-Compose: a composable call as the whole argument manages its own slots and must
         // stay in normal composition flow — never defer it into a calculation lambda.
@@ -320,6 +344,75 @@ class ComposeCallSiteRememberWrapper(
             varargElementType = vararg.varargElementType,
             elements = rewritten,
         )
+    }
+
+    /**
+     * Post-Compose, a lambda argument arrives already memoized by Compose as
+     * `cache($composer, <invalid>) { <lambda> }`. Compose leaves a read of a local delegated
+     * property (`var query by mutableStateOf("")`) out of `<invalid>`: the lambda reads the
+     * current value when invoked, so for Compose it never needs recreating. A callee that
+     * restarts on the argument's identity (e.g. `LaunchedEffect(filter)`) then never sees the
+     * value change. Such reads are ORed into `<invalid>` as `$composer.changed(<value>)` — the
+     * same slot-consuming shape Compose emits for its own captures, evaluated on every
+     * composition.
+     *
+     * Reads that no recognisable `cache` call can be keyed on are reported as a warning.
+     */
+    private fun keyCacheOnDelegatedReads(
+        enclosing: IrSimpleFunction,
+        composerParam: IrValueParameter,
+        block: IrBlock,
+    ) {
+        val cacheCalls = mutableListOf<IrCall>()
+        block.acceptVoid(object : IrVisitorVoid() {
+            override fun visitElement(element: IrElement) {
+                element.acceptChildrenVoid(this)
+            }
+
+            override fun visitCall(expression: IrCall) {
+                if (expression.symbol == composerSymbols.cache) cacheCalls += expression
+                else super.visitCall(expression)
+            }
+
+            override fun visitFunctionExpression(expression: IrFunctionExpression) {
+                // Invoke-time code — not part of the memoization shape.
+            }
+        })
+
+        val symbols = composerSymbols
+        val regulars = symbols.cache.owner.parameters.filter { it.kind == IrParameterKind.Regular }
+        val invalidParam = regulars[0]
+        val blockParam = regulars[1]
+        val keyed = mutableSetOf<IrDeclarationWithName>()
+        for (call in cacheCalls) {
+            val calculation = call.arguments[blockParam.indexInParameters] ?: continue
+            val getters = collectCaptures(calculation).filter { it.decl is IrSimpleFunction }
+            if (getters.isEmpty()) continue
+            val builder = DeclarationIrBuilder(pluginContext, enclosing.symbol)
+            val invalid = call.arguments[invalidParam.indexInParameters] ?: continue
+            call.arguments[invalidParam.indexInParameters] = getters.fold(invalid) { acc, cap ->
+                builder.irCall(booleanOrSymbol).apply {
+                    dispatchReceiver = acc
+                    val regular = booleanOrSymbol.owner.parameters
+                        .first { it.kind == IrParameterKind.Regular }
+                    arguments[regular.indexInParameters] =
+                        buildChangedCall(symbols.changed, composerParam, readCapture(builder, cap), builder)
+                }
+            }
+            getters.mapTo(keyed) { it.decl }
+        }
+
+        val unkeyed = collectCaptures(block).map { it.decl }
+            .filter { it is IrSimpleFunction && it !in keyed }
+        if (unkeyed.isNotEmpty()) {
+            messageCollector.report(
+                CompilerMessageSeverity.WARNING,
+                "[OktopoiPlugin] @WrapInRemember argument in ${enclosing.kotlinFqName} reads " +
+                    "${unkeyed.joinToString { it.name.asString() }} but is already memoized in a " +
+                    "shape the plugin cannot key; the callee will not see changes to it. Wrap the " +
+                    "argument in remember(<those values>) { ... } manually.",
+            )
+        }
     }
 
     private fun isAlreadyMemoized(arg: IrExpression): Boolean {
@@ -433,9 +526,12 @@ class ComposeCallSiteRememberWrapper(
         return result
     }
 
-    /** All value declarations (variables, function/lambda parameters) within [element]. */
-    private fun collectValueDeclarations(element: IrElement): Set<IrValueDeclaration> {
-        val decls = mutableSetOf<IrValueDeclaration>()
+    /**
+     * All value declarations (variables, function/lambda parameters) within [element], plus the
+     * getters of local delegated properties declared there.
+     */
+    private fun collectValueDeclarations(element: IrElement): Set<IrDeclarationWithName> {
+        val decls = mutableSetOf<IrDeclarationWithName>()
         element.acceptVoid(object : IrVisitorVoid() {
             override fun visitElement(element: IrElement) {
                 element.acceptChildrenVoid(this)
@@ -449,6 +545,11 @@ class ComposeCallSiteRememberWrapper(
             override fun visitVariable(declaration: IrVariable) {
                 decls += declaration
                 super.visitVariable(declaration)
+            }
+
+            override fun visitLocalDelegatedProperty(declaration: IrLocalDelegatedProperty) {
+                decls += declaration.getter
+                super.visitLocalDelegatedProperty(declaration)
             }
         })
         return decls
@@ -549,13 +650,18 @@ class ComposeCallSiteRememberWrapper(
      * `$changed`, `$dirty`, `$default`) are excluded: they're compiler plumbing, not real
      * captures.
      *
+     * Reads of a local delegated property declared outside the subtree (`IrCall` of its getter,
+     * origin `GET_LOCAL_PROPERTY`) are captures too, keyed on the getter's result. Without them
+     * `{ query.isEmpty() || ... }` over `var query by mutableStateOf("")` would have no key and
+     * be cached forever, so a callee keyed on the argument's identity never sees the change.
+     *
      * Captures are tagged as [Capture.isVarargArray] when they reference an enclosing
      * composable's `vararg` parameter — those need element-wise keying because the Array
      * identity is re-synthesized every recomposition.
      */
     private fun collectCaptures(arg: IrExpression): List<Capture> {
-        val localDecls = mutableSetOf<IrValueDeclaration>()
-        val captures = linkedSetOf<IrValueDeclaration>()
+        val localDecls = mutableSetOf<IrDeclarationWithName>()
+        val captures = linkedSetOf<IrDeclarationWithName>()
 
         arg.acceptVoid(object : IrVisitorVoid() {
             override fun visitElement(element: IrElement) {
@@ -573,12 +679,27 @@ class ComposeCallSiteRememberWrapper(
                 super.visitVariable(declaration)
             }
 
+            override fun visitLocalDelegatedProperty(declaration: IrLocalDelegatedProperty) {
+                localDecls += declaration.getter
+                super.visitLocalDelegatedProperty(declaration)
+            }
+
             override fun visitGetValue(expression: IrGetValue) {
                 val target = expression.symbol.owner
                 if (target !in localDecls && !target.name.asString().startsWith("\$")) {
                     captures += target
                 }
                 super.visitGetValue(expression)
+            }
+
+            override fun visitCall(expression: IrCall) {
+                val getter = expression.symbol.owner
+                if (expression.origin == IrStatementOrigin.GET_LOCAL_PROPERTY &&
+                    getter.parameters.isEmpty() && getter !in localDecls
+                ) {
+                    captures += getter
+                }
+                super.visitCall(expression)
             }
         })
 
@@ -660,10 +781,10 @@ class ComposeCallSiteRememberWrapper(
                     IrSpreadElementImpl(
                         startOffset = UNDEFINED_OFFSET,
                         endOffset = UNDEFINED_OFFSET,
-                        expression = builder.irGet(cap.decl),
+                        expression = readCapture(builder, cap),
                     )
                 } else {
-                    builder.irGet(cap.decl)
+                    readCapture(builder, cap)
                 }
             }
             val keysVararg = IrVarargImpl(
@@ -736,12 +857,12 @@ class ComposeCallSiteRememberWrapper(
                         val params = arrayChangedOrSymbol.owner.parameters
                             .filter { it.kind == IrParameterKind.Regular }
                         arguments[params[0].indexInParameters] = builder.irGet(composerParam)
-                        arguments[params[1].indexInParameters] = builder.irGet(cap.decl)
+                        arguments[params[1].indexInParameters] = readCapture(builder, cap)
                         arguments[params[2].indexInParameters] = acc
                     }
                 } else {
                     // acc or $composer.changed(cap)
-                    val chg = buildChangedCall(symbols.changed, composerParam, cap.decl, builder)
+                    val chg = buildChangedCall(symbols.changed, composerParam, readCapture(builder, cap), builder)
                     builder.irCall(booleanOrSymbol).apply {
                         dispatchReceiver = acc
                         val regular = booleanOrSymbol.owner.parameters
@@ -778,14 +899,14 @@ class ComposeCallSiteRememberWrapper(
     private fun buildChangedCall(
         changedSym: IrSimpleFunctionSymbol,
         composerParam: IrValueParameter,
-        capture: IrValueDeclaration,
+        key: IrExpression,
         builder: DeclarationIrBuilder,
     ): IrExpression {
         return builder.irCall(changedSym).apply {
             dispatchReceiver = builder.irGet(composerParam)
             val regular = changedSym.owner.parameters
                 .first { it.kind == IrParameterKind.Regular }
-            arguments[regular.indexInParameters] = builder.irGet(capture)
+            arguments[regular.indexInParameters] = key
         }
     }
 

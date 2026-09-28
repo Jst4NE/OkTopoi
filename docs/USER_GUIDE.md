@@ -491,6 +491,12 @@ val items = Data.items.asSnapshotStateList(
 )
 ```
 
+What counts as a key:
+
+- **A plain local or parameter** (`val limit = …`, `selectedStatus: Status?`): keyed on its value.
+- **A local delegated property** (`var searchQuery by remember { mutableStateOf("") }`): keyed on its **current value**. The plugin reads it at the call site, which also subscribes the composable to it, so typing recomposes the caller, the key changes, a new lambda is built and the list rebuilds. Compose's own lambda memoization deliberately leaves such reads out, because for Compose a lambda that reads the current value never needs recreating; OkTopoi's functions restart on the lambda's identity, so the plugin adds them.
+- **State read through a holder**, not keyed on its value: `val query = remember { mutableStateOf("") }` then `query.value` inside the lambda keys on the `MutableState` object, which never changes. The same goes for state outside the composable (`Data.filter.value`). Read such state into a local (or delegate it with `by`) and use the local inside the lambda.
+
 This applies to all lambda and comparator parameters on `asSnapshotStateList`, `asSnapshotStateListBySecondaryKey`, `asSnapshotStateMapBySecondaryKey`, `asSnapshotStateListWithJoins`, `asSnapshotStateMapWithJoins`, `asSnapshotStateMapTransformed`, `mapState`, `mergedSnapshotStateList`, `mergedSnapshotStateMap`, `rememberTransformed`, and `rememberSuspendTransformed`.
 
 ## Schema Evolution
