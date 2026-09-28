@@ -18,7 +18,7 @@ kotlin {
 
     jvm {
         compilerOptions {
-            jvmTarget.set(JvmTarget.JVM_17)
+            jvmTarget.set(JvmTarget.JVM_25)
         }
     }
 
@@ -28,6 +28,8 @@ kotlin {
         minSdk = libs.versions.android.minSdk.get().toInt()
 
         compilerOptions {
+            // Stays at 11 while everything else is on 25. Android bytecode level is dictated by
+            // minSdk and what D8 will dex, not by the JDK the build runs on.
             jvmTarget.set(JvmTarget.JVM_11)
         }
     }
@@ -80,6 +82,12 @@ kotlin {
                 implementation(libs.kotlinx.coroutines.test)
             }
         }
+    }
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
     }
 }
 

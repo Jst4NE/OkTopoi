@@ -8,10 +8,6 @@ dependencies {
     compileOnly(libs.kotlin.compiler.embeddable)
 }
 
-kotlin {
-    jvmToolchain(17)
-}
-
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
     compilerOptions.allWarningsAsErrors.set(false)
     compilerOptions.freeCompilerArgs.addAll(listOf(

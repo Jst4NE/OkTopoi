@@ -19,6 +19,16 @@ allprojects {
     // GitHub credentials from environment (used by GitHub Actions)
     extra["github.actor"] = System.getenv("GITHUB_ACTOR") ?: ""
     extra["github.token"] = System.getenv("GITHUB_TOKEN") ?: ""
+
+    afterEvaluate {
+        if (plugins.hasPlugin("java")) {
+            configure<JavaPluginExtension> {
+                toolchain {
+                    languageVersion = JavaLanguageVersion.of(25)
+                }
+            }
+        }
+    }
 }
 
 // GitHub Packages requires lowercase artifact IDs
