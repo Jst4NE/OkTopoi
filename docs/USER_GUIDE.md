@@ -86,18 +86,18 @@ val users = es<String, User>()
 
 // With secondary indices
 val users = es<String, User> {
-    key("department") { it.department }
-    key("level") { it.level }
+    key(User::department)
+    key(User::level)
 }
 
 // Persistent collection
 val users = eps<String, User> {
-    key("department") { it.department }
+    key(User::department)
 }
 
 // Synchronized persistent collection (e.g., with Supabase)
 val users = esps<String, User>(
-    secondaryKeys = { key("department") { it.department } },
+    secondaryKeys = { key(User::department) },
     incomingSync = incomingFlow,
     outgoingSync = { key, value, timestamp -> sendToRemote(key, value, timestamp) }
 )
@@ -114,8 +114,8 @@ val allEntries = users.entries()       // All entries
 val allKeys = users.keys()             // All keys
 
 // Secondary index queries
-val engineers = users.getBy("department" to "Engineering")
-val seniorEngineers = users.getBy("department" to "Engineering", "level" to "Senior")
+val engineers = users.getBy(User::department to "Engineering")
+val seniorEngineers = users.getBy(User::department to "Engineering", User::level to "Senior")
 
 // Functional operations
 val names = users.map { it.value.name }
@@ -123,10 +123,35 @@ val active = users.filter { it.value.isActive }
 val emails = users.mapNotNull { it.value.email }
 
 // Iterate by secondary key
-users.forEachBy("department" to "Engineering") { key, user ->
+users.forEachBy(User::department to "Engineering") { key, user ->
     println("$key: ${user.name}")
 }
 ```
+
+### Naming secondary indices
+
+An index is identified by a name. `key(User::department)` names it after the property
+(`"department"`) and extracts the value with it, and every API that takes an index name —
+`getBy`, `forEachBy`, `getSecondaryKey(s)`, `containsSecondaryKey`,
+`asSnapshotStateListBySecondaryKey`, `asSnapshotStateMapBySecondaryKey`, `fetchBy`,
+`GroupedMergeSource`/`asGroupedMergeSource` — has an overload taking the property. Prefer it:
+a misspelt or renamed index is then a compile error rather than a lookup that silently finds
+nothing, and `asSnapshotStateMapBySecondaryKey(groupBy = …)` / `GroupedMergeSource(es, …)`
+infer the group key type from the property.
+
+The string form stays for a computed key, or a name that differs from any property:
+
+```kotlin
+val stations = esps<Long, StationDto> {
+    key(StationDto::region)
+    key("fullName") { "${it.city} ${it.name}" }
+}
+stations.getBy("fullName" to "Ljubljana Center")
+```
+
+A property reference names the index after the property, so it finds only an index declared
+under that name — `key(StationDto::region)` or `key("region") { … }`. The lookup value is not
+type-checked against the property in either form.
 
 ## Compose Integration
 
@@ -170,7 +195,7 @@ Efficiently filters by secondary index, then optionally applies additional filte
 @Composable
 fun EngineerList() {
     val engineers = Data.users.asSnapshotStateListBySecondaryKey(
-        "department" to "Engineering",
+        User::department to "Engineering",
         entryComparator = compareBy { it.value.name }
     )
 }
@@ -186,8 +211,8 @@ Groups entries by a secondary index key. Each group is an independent `SnapshotS
 @Composable
 fun OrdersScreen() {
     // Group items by orderId
-    val itemsByOrder = Data.orderItems.asSnapshotStateMapBySecondaryKey<Long>(
-        groupByKey = OrderItemDto::orderId.name,
+    val itemsByOrder = Data.orderItems.asSnapshotStateMapBySecondaryKey(
+        groupBy = OrderItemDto::orderId,  // group key type (Long) inferred from the property
         entryComparator = compareBy { it.value.sequenceNumber },
         filter = { entry ->
             selectedCategory == null || entry.value.category == selectedCategory
@@ -224,11 +249,11 @@ fun OrdersScreen() {
 // BAD — fetching children inside each card causes all cards to recompose
 @Composable
 fun OrderCard(order: OrderDto) {
-    val items = Data.orderItems.getBy(OrderItemDto::orderId.name to order.id) // suspend in every card!
+    val items = Data.orderItems.getBy(OrderItemDto::orderId to order.id) // suspend in every card!
 }
 
 // GOOD — fetch once at parent level, pass to children
-val itemsByOrder = Data.orderItems.asSnapshotStateMapBySecondaryKey<Long>(...)
+val itemsByOrder = Data.orderItems.asSnapshotStateMapBySecondaryKey(groupBy = OrderItemDto::orderId, ...)
 OrderCard(order = order, items = itemsByOrder[order.id] ?: emptyList())
 ```
 
@@ -250,7 +275,7 @@ fun EnrichedOrderList() {
             // Fetch related data — dependencies are automatically tracked
             val customer = context.fetch(Data.customers, order.customerId)
                 ?: return@asSnapshotStateListWithJoins null
-            val items = context.fetchBy(Data.orderItems, OrderItemDto::orderId.name to order.id)
+            val items = context.fetchBy(Data.orderItems, OrderItemDto::orderId to order.id)
 
             EnrichedOrder(order, customer, items.map { it.value })
         }
@@ -280,7 +305,7 @@ fun OrdersByCustomer() {
             val order = entry.value
             if (statusFilter != null && order.status != statusFilter) return@asSnapshotStateMapWithJoins null
 
-            val items = context.fetchBy(Data.orderItems, OrderItemDto::orderId.name to order.id)
+            val items = context.fetchBy(Data.orderItems, OrderItemDto::orderId to order.id)
             EnrichedOrder(order, items.map { it.value })
         }
     )
@@ -326,7 +351,7 @@ fun CustomerActivity(customerId: Long) {
             val event = entry.value
             if (event.customerId != customerId) return@asMergeSource null
             // Fetch orders to compute position between sequence anchors
-            val orders = ctx.fetchBy(Data.orders, "customerId" to customerId)
+            val orders = ctx.fetchBy(Data.orders, OrderDto::customerId to customerId)
             val sortKey = interpolatePosition(orders, event.timestamp)
             ActivityItem.Unlinked(event, sortKey = sortKey)
         },
@@ -356,15 +381,15 @@ This is more efficient than calling `mergedSnapshotStateList` per group, because
 fun CustomerBoard() {
     val activityByCustomer: SnapshotStateMap<Long, SnapshotStateList<ActivityItem>> =
         mergedSnapshotStateMap(
-            GroupedMergeSource(Data.orders, "customerId") { entry, ctx ->
+            GroupedMergeSource(Data.orders, OrderDto::customerId) { entry, ctx ->
                 val agent = ctx.fetch(Data.users, entry.value.agentId)
                 ActivityItem.Order(entry.value, agent)
             },
-            GroupedMergeSource(Data.payments, "customerId") { entry, _ ->
+            GroupedMergeSource(Data.payments, PaymentDto::customerId) { entry, _ ->
                 ActivityItem.Payment(entry.value)
             },
-            GroupedMergeSource(Data.unlinkedEvents, "customerId") { entry, ctx ->
-                val orders = ctx.fetchBy(Data.orders, "customerId" to entry.value.customerId)
+            GroupedMergeSource(Data.unlinkedEvents, UnlinkedEventDto::customerId) { entry, ctx ->
+                val orders = ctx.fetchBy(Data.orders, OrderDto::customerId to entry.value.customerId)
                 val sortKey = interpolatePosition(orders, entry.value.timestamp)
                 ActivityItem.Unlinked(entry.value, sortKey = sortKey)
             },

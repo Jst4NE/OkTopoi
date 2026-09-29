@@ -36,6 +36,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.concurrent.atomics.decrementAndFetch
 import kotlin.concurrent.atomics.incrementAndFetch
+import kotlin.jvm.JvmName
+import kotlin.reflect.KProperty1
 
 /**
  * Reactive observable collection that extends TreeMap with change notifications and UI integrations.
@@ -490,6 +492,33 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     }
 
 /**
+     * [asSnapshotStateMapBySecondaryKey] grouped by the index named after [groupBy]
+     * (see [TreeMap.SecondaryIndexBuilder.key]). The group key type is inferred from the property.
+     *
+     * ```kotlin
+     * val chambersByTrailer = chambers.asSnapshotStateMapBySecondaryKey(
+     *     groupBy = ChamberDto::trailerId,
+     *     entryComparator = compareBy { it.value.chamberNo },
+     * )
+     * ```
+     */
+    @Composable
+    fun <SK : Any> asSnapshotStateMapBySecondaryKey(
+        groupBy: KProperty1<ValueType, SK?>,
+        @WrapInRemember entryComparator: Comparator<Map.Entry<KeyType, ValueType>>,
+        @WrapInRemember filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
+        minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
+    ): SnapshotStateMap<SK, SnapshotStateList<Map.Entry<KeyType, ValueType>>> =
+        asSnapshotStateMapBySecondaryKey(
+            groupByKey = groupBy.name,
+            entryComparator = entryComparator,
+            filter = filter,
+            lifecycleOwner = lifecycleOwner,
+            minActiveState = minActiveState,
+        )
+
+    /**
      * Creates a reactive SnapshotStateList filtered by multiple secondary key criteria with efficient O(k) initial lookup.
      *
      * This function provides high-performance filtered reactive lists by leveraging secondary indexes.
@@ -658,6 +687,46 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
             minActiveState = minActiveState
         )
     }
+
+    /**
+     * [asSnapshotStateListBySecondaryKey] with criteria naming each index by its property
+     * (see [TreeMap.SecondaryIndexBuilder.key]): `Item::orderId to order.id`.
+     */
+    @Composable
+    @JvmName("asSnapshotStateListBySecondaryKeyProperty")
+    fun asSnapshotStateListBySecondaryKey(
+        vararg criteria: Pair<KProperty1<ValueType, *>, Any?>,
+        @WrapInRemember entryComparator: Comparator<Map.Entry<KeyType, ValueType>>,
+        @WrapInRemember filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
+        minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
+    ): SnapshotStateList<Map.Entry<KeyType, ValueType>> =
+        asSnapshotStateListBySecondaryKey(
+            criteria = *criteria.byIndexName(),
+            entryComparator = entryComparator,
+            filter = filter,
+            lifecycleOwner = lifecycleOwner,
+            minActiveState = minActiveState,
+        )
+
+    /**
+     * [asSnapshotStateListBySecondaryKey] (sorted by the criteria) with criteria naming each
+     * index by its property (see [TreeMap.SecondaryIndexBuilder.key]).
+     */
+    @Composable
+    @JvmName("asSnapshotStateListBySecondaryKeySortedProperty")
+    fun asSnapshotStateListBySecondaryKey(
+        vararg criteria: Pair<KProperty1<ValueType, *>, Comparable<*>?>,
+        @WrapInRemember filter: (suspend (Map.Entry<KeyType, ValueType>) -> Boolean)? = null,
+        lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
+        minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
+    ): SnapshotStateList<Map.Entry<KeyType, ValueType>> =
+        asSnapshotStateListBySecondaryKey(
+            criteria = *criteria.byIndexName(),
+            filter = filter,
+            lifecycleOwner = lifecycleOwner,
+            minActiveState = minActiveState,
+        )
 
     /**
      * Creates a reactive State for a single key that automatically updates when the value changes.
@@ -1854,6 +1923,16 @@ class JoinContext internal constructor() {
         }
         return entries
     }
+
+    /**
+     * [fetchBy] with criteria naming each index by its property
+     * (see [TreeMap.SecondaryIndexBuilder.key]): `fetchBy(items, Item::orderId to order.id)`.
+     */
+    @JvmName("fetchByProperty")
+    suspend fun <K : Any, V : Any> fetchBy(
+        es: Es<K, V>,
+        vararg criteria: Pair<KProperty1<V, *>, Any?>
+    ): List<Map.Entry<K, V>> = fetchBy(es, *criteria.byIndexName())
 }
 
 /**

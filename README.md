@@ -7,12 +7,12 @@ integration and a K2 compiler plugin that removes the boilerplate.
 ```kotlin
 val theme = ep<String> { "dark" }           // persistent state — survives restart
 val users = esps<String, User> {            // persistent, synced collection
-    key("department") { it.department }     // with a secondary index
+    key(User::department)                   // with a secondary index
 }
 
 @Composable
 fun UserList() {
-    val engineers = users.asSnapshotStateListBySecondaryKey("department" to "Engineering")
+    val engineers = users.asSnapshotStateListBySecondaryKey(User::department to "Engineering")
     LazyColumn { items(engineers) { UserRow(it) } }   // recomposes on local edits and remote sync
 }
 ```

@@ -22,6 +22,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
+import kotlin.reflect.KProperty1
 
 // ============================================================================
 // Multi-collection merge source definitions
@@ -65,7 +66,9 @@ class MergeSource<K : Any, V : Any, T : Any>(
  * @param T the common result type that all sources project into
  * @param es the source Es collection
  * @param groupKey the name of the secondary index used for grouping.
- *                 The secondary index must be defined on the Es collection.
+ *                 The secondary index must be defined on the Es collection. The secondary
+ *                 constructor takes the property instead, for an index declared with
+ *                 `key(Property)` (see [TreeMap.SecondaryIndexBuilder.key]).
  * @param filter optional fast pre-filter that runs before [project]. Plain function (no suspend,
  *               no JoinContext) for cheaply rejecting entries based on their own fields before the
  *               heavier projection runs. Entries rejected by filter are not tracked for dependencies.
@@ -79,7 +82,15 @@ class GroupedMergeSource<K : Any, V : Any, G : Any, T : Any>(
     val groupKey: String,
     val filter: (Map.Entry<K, V>) -> Boolean = { true },
     val project: suspend (entry: Map.Entry<K, V>, context: JoinContext) -> T?,
-)
+) {
+    /** Groups by the index named after [groupBy]; the group type [G] is inferred from it. */
+    constructor(
+        es: Es<K, V>,
+        groupBy: KProperty1<V, G?>,
+        filter: (Map.Entry<K, V>) -> Boolean = { true },
+        project: suspend (entry: Map.Entry<K, V>, context: JoinContext) -> T?,
+    ) : this(es, groupBy.name, filter, project)
+}
 
 /**
  * Convenience extension to create a [MergeSource] from an Es collection.
@@ -110,6 +121,16 @@ fun <K : Any, V : Any, G : Any, T : Any> Es<K, V>.asGroupedMergeSource(
     filter: (Map.Entry<K, V>) -> Boolean = { true },
     project: suspend (entry: Map.Entry<K, V>, context: JoinContext) -> T?,
 ) = GroupedMergeSource<K, V, G, T>(this, groupKey, filter, project)
+
+/**
+ * [asGroupedMergeSource] grouped by the index named after [groupBy]; the group type [G] is
+ * inferred from it: `Data.orders.asGroupedMergeSource(OrderDto::customerId) { entry, ctx -> … }`.
+ */
+fun <K : Any, V : Any, G : Any, T : Any> Es<K, V>.asGroupedMergeSource(
+    groupBy: KProperty1<V, G?>,
+    filter: (Map.Entry<K, V>) -> Boolean = { true },
+    project: suspend (entry: Map.Entry<K, V>, context: JoinContext) -> T?,
+) = GroupedMergeSource<K, V, G, T>(this, groupBy.name, filter, project)
 
 // ============================================================================
 // Composite key for tracking items across multiple sources

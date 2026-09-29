@@ -2,6 +2,8 @@ package jst.oktopoi
 
 import co.touchlab.kermit.Logger
 import kotlin.collections.emptySet
+import kotlin.jvm.JvmName
+import kotlin.reflect.KProperty1
 
 
 /**
@@ -276,6 +278,10 @@ open class TreeMap<K, V> internal constructor(
         return extractor(value)
     }
 
+    /** [getSecondaryKey] for the index named after [property] (see [SecondaryIndexBuilder.key]). */
+    fun getSecondaryKey(property: KProperty1<V, *>, value: V): Any? =
+        getSecondaryKey(property.name, value)
+
     /**
      * Builder for configuring secondary indexes.
      */
@@ -293,6 +299,16 @@ open class TreeMap<K, V> internal constructor(
             treeMap.addSecondaryIndex(indexName, keyExtractor)
             return this
         }
+
+        /**
+         * Adds a secondary index on [property], named after it: `key(User::department)` is
+         * `key("department") { it.department }`. Every API that takes an index name has an
+         * overload taking the property, so the index is referenced without a string.
+         *
+         * Use the string form for a computed key or a name that differs from the property.
+         */
+        fun key(property: KProperty1<V, *>): SecondaryIndexBuilder<K, V> =
+            key(property.name) { property.get(it) }
     }
     
     /**
@@ -301,8 +317,8 @@ open class TreeMap<K, V> internal constructor(
      * Example:
      * ```kotlin
      * val treeMap = TreeMap<String, Person> {
-     *     key("email") { person -> person.email }
-     *     key("id") { person -> person.id.toString() }
+     *     key(Person::email)
+     *     key("idText") { person -> person.id.toString() }
      * }
      * ```
      */
@@ -497,6 +513,22 @@ open class TreeMap<K, V> internal constructor(
 
     suspend fun getBy(vararg criteria: Pair<String, Any?>): Collection<V> =
         rwLock.withReadLock { getByUnsafe(*criteria) }
+
+    // Property overloads: the index named after each property (see [SecondaryIndexBuilder.key]).
+
+    suspend fun containsSecondaryKey(property: KProperty1<V, *>, secondaryKey: Any?): Boolean =
+        containsSecondaryKey(property.name, secondaryKey)
+
+    suspend fun getSecondaryKeys(property: KProperty1<V, *>): Set<Any?> =
+        getSecondaryKeys(property.name)
+
+    @JvmName("forEachByProperty")
+    suspend fun forEachBy(vararg criteria: Pair<KProperty1<V, *>, Any?>, action: (key: K, value: V) -> Unit) =
+        forEachBy(*criteria.byIndexName(), action = action)
+
+    @JvmName("getByProperty")
+    suspend fun getBy(vararg criteria: Pair<KProperty1<V, *>, Any?>): Collection<V> =
+        getBy(*criteria.byIndexName())
 
     // ========================================================================
     // Extended Map Operations (suspend-based)
@@ -850,3 +882,7 @@ open class TreeMap<K, V> internal constructor(
         return null
     }
 }
+
+/** Property criteria as index-name criteria: each index is named after its property. */
+internal fun <V, T> Array<out Pair<KProperty1<V, *>, T>>.byIndexName(): Array<Pair<String, T>> =
+    Array(size) { this[it].first.name to this[it].second }
