@@ -80,8 +80,8 @@ rather than be skipped.
 
 | Target | Notes |
 |---|---|
-| JVM (17) | full |
-| Android (JVM 11) | full |
+| JVM (25) | full |
+| Android (JVM 11, minSdk 26) | full |
 | iOS arm64 | full; simulator target not enabled |
 | Linux x64 | full |
 | wasm-js | in-memory only, no persistence |
