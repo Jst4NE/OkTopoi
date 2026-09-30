@@ -20,7 +20,7 @@ import jst.oktopoi.TreeMap.MapChange.Rebuild
 import jst.oktopoi.TreeMap.MapChange.Removed
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.launch
 import kotlin.reflect.KProperty1
 
@@ -334,18 +334,20 @@ fun <T : Any> mergedSnapshotStateList(
     // --- Collector coroutine: single consumer of all events ---
     LaunchedEffect(comparator, *sources, minActiveState) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(minActiveState) {
-            // Initial rebuild
-            rebuild()
-
             coroutineScope {
-                // Launch source change listeners that feed into the channel
+                // Subscribe to every source before building: UNDISPATCHED registers each
+                // subscription before launch returns, so a change written during rebuild() is
+                // queued in eventChannel rather than lost. Re-evaluation reads current values by
+                // key, so a queued change the build already saw is harmless.
                 sources.forEachIndexed { sourceIndex, source ->
-                    launch {
+                    launch(start = CoroutineStart.UNDISPATCHED) {
                         source.es.changes.collect { change ->
                             eventChannel.send(MergeEvent.SourceChange(sourceIndex, change))
                         }
                     }
                 }
+
+                rebuild()
 
                 // Launch dependency tracker subscription
                 launch {
@@ -632,17 +634,20 @@ fun <G : Any, T : Any> mergedSnapshotStateMap(
     // --- Collector coroutine ---
     LaunchedEffect(comparator, *sources, minActiveState) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(minActiveState) {
-            rebuild()
-
             coroutineScope {
-                // Launch source change listeners
+                // Subscribe to every source before building: UNDISPATCHED registers each
+                // subscription before launch returns, so a change written during rebuild() is
+                // queued in eventChannel rather than lost. Re-evaluation reads current values by
+                // key, so a queued change the build already saw is harmless.
                 sources.forEachIndexed { sourceIndex, source ->
-                    launch {
+                    launch(start = CoroutineStart.UNDISPATCHED) {
                         source.es.changes.collect { change ->
                             eventChannel.send(MergeEvent.SourceChange(sourceIndex, change))
                         }
                     }
                 }
+
+                rebuild()
 
                 // Launch dependency tracker subscription
                 launch {

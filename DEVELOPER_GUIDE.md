@@ -339,6 +339,23 @@ fun SupplierCard(supplier: SupplierDto) {
 - **Multi-source Joins**: Automatic dependency tracking across multiple Es collections
 - **Parameter Stability**: Use `remember {}` to wrap unstable parameters
 
+#### Snapshot and subscription order
+
+Every view built on `changes` must **subscribe before it reads its snapshot**:
+`changes.onSubscription { emit(Rebuild()) }`, or a collector launched with
+`CoroutineStart.UNDISPATCHED` before the build. Reading first and subscribing second loses any
+change written in between, until the next rebuild.
+
+Subscribing first means a change written *during* the snapshot read is both queued and possibly
+already in the snapshot. Views that re-read the current value by key (joins, merged lists,
+`asState`, `asSnapshotStateMapTransformed`, the `Esps` sync-state flows) absorb that for free.
+The sorted views (`asSnapshotStateList`, `asSnapshotStateMapBySecondaryKey`) apply a change by
+trusting its `oldValue`, which would duplicate a row, so they bracket the read with the change
+counter (`SnapshotWindow`): every emitted change carries an internal `MapChange.seq`, assigned
+under the write lock after the mutation. Changes numbered at or below the counter read before
+the snapshot are skipped, those numbered within the read are applied by key (an O(n) scan, but
+the window is short), and later ones take the normal O(log n) path.
+
 #### Performance Characteristics
 
 - **asSnapshotStateList**: O(n) initial, O(log n) per update

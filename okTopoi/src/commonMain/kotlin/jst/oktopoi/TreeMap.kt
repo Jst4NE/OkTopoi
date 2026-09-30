@@ -75,6 +75,14 @@ open class TreeMap<K, V> internal constructor(
      */
     sealed class MapChange<K, V> {
         /**
+         * Position of this change in its collection's change stream, assigned by
+         * [Es.emitChange] from 1 upwards; 0 for a change not emitted through it (the Rebuild a
+         * view injects for itself). A view compares it with the counter read around its
+         * snapshot to tell which queued changes that snapshot already contains.
+         */
+        internal var seq: Long = 0L
+
+        /**
          * Represents a put operation (insert or update).
          */
         data class Put<K, V>(

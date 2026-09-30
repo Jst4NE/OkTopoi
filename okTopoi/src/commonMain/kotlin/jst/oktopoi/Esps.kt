@@ -4,6 +4,8 @@ package jst.oktopoi
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -15,10 +17,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
@@ -520,28 +520,47 @@ override fun fromPersistString(string: String, fileName: String) {
      *
      * For a shared/replaying view, wrap with `.shareIn(scope, WhileSubscribed(), replay = 1)`.
      */
-    val unsyncedKeys: Flow<Set<KeyType>> = merge(changes, unsyncedTick)
-        .map { getUnsyncedKeys() }
-        .onStart { emit(getUnsyncedKeys()) }
-        .distinctUntilChanged()
+    val unsyncedKeys: Flow<Set<KeyType>> =
+        syncStateFlow(isRelevant = { true }, isRelevantTick = { true }) { getUnsyncedKeys() }
 
     /**
      * Cold flow of [isSynced] for a single key. Re-evaluates only on changes that could
      * affect this key: its own Put/Removed, structural Cleared/Rebuild, or a sync-success
      * tick for this key.
      */
-    fun isSyncedFlow(key: KeyType): Flow<Boolean> = merge(
-        changes.filter { change ->
+    fun isSyncedFlow(key: KeyType): Flow<Boolean> = syncStateFlow(
+        isRelevant = { change ->
             when (change) {
-                is TreeMap.MapChange.Put<*, *>     -> change.key == key
-                is TreeMap.MapChange.Removed<*, *> -> change.key == key
-                else                               -> true // Cleared / Rebuild
+                is TreeMap.MapChange.Put     -> change.key == key
+                is TreeMap.MapChange.Removed -> change.key == key
+                else                         -> true // Cleared / Rebuild
             }
         },
-        unsyncedTick.filter { it == key }
-    ).map { isSynced(key) }
-     .onStart { emit(isSynced(key)) }
-     .distinctUntilChanged()
+        isRelevantTick = { it == key },
+    ) { isSynced(key) }
+
+    /**
+     * Emits [compute] now and again after every relevant change or sync tick, distinct values
+     * only. Both sources are subscribed before the first computation (UNDISPATCHED registers a
+     * subscription before launch returns), so a change written in between is not lost; a burst
+     * coalesces into one recomputation (conflated signal), and the sources are drained at once,
+     * so a slow consumer never backs up [changes] or [unsyncedTick].
+     */
+    private fun <T> syncStateFlow(
+        isRelevant: (TreeMap.MapChange<KeyType, ValueType>) -> Boolean,
+        isRelevantTick: (KeyType) -> Boolean,
+        compute: suspend () -> T,
+    ): Flow<T> = channelFlow {
+        val dirty = Channel<Unit>(Channel.CONFLATED)
+        launch(start = CoroutineStart.UNDISPATCHED) {
+            changes.collect { if (isRelevant(it)) dirty.trySend(Unit) }
+        }
+        launch(start = CoroutineStart.UNDISPATCHED) {
+            unsyncedTick.collect { if (isRelevantTick(it)) dirty.trySend(Unit) }
+        }
+        dirty.trySend(Unit)
+        for (signal in dirty) send(compute())
+    }.distinctUntilChanged()
 
     /**
      * Sync an entry with dependency resolution.

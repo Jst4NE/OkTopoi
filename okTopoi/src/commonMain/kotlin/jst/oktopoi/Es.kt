@@ -22,6 +22,7 @@ import jst.oktopoi.TreeMap.MapChange.Put
 import jst.oktopoi.TreeMap.MapChange.Rebuild
 import jst.oktopoi.TreeMap.MapChange.Removed
 import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.BufferOverflow
@@ -30,7 +31,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -140,6 +141,14 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     // Depth counter for bulk change suppression. When > 0, individual Put/Remove events are
     // suppressed and a single Rebuild is emitted when depth returns to 0.
     private val bulkChangeDepth = AtomicInt(0)
+
+    // Number of the last change emitted (see [TreeMap.MapChange.seq]). Put/Removed/Cleared are
+    // numbered under the write lock, so their numbers follow both the map's mutation order and
+    // the change stream's order.
+    private val changeSeq = AtomicLong(0L)
+
+    /** The number of the last change emitted — read around a snapshot (see [MapChange.seq]). */
+    internal fun lastChangeSeq(): Long = changeSeq.load()
     
     /**
      * Flow of changes made to this Es.
@@ -188,6 +197,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      */
     protected fun emitChange(change: MapChange<KeyType, ValueType>) {
         if (bulkChangeDepth.load() > 0 && change !is Rebuild) return
+        change.seq = changeSeq.incrementAndFetch()
         val success = _changeFlow.tryEmit(change)
         if (!success) {
             throw IllegalStateException("Change flow buffer overflow. Consider increasing buffer size or adding .buffer() to your flow consumer.")
@@ -317,16 +327,26 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
         LaunchedEffect(entryComparator, filter, minActiveState) {
             lifecycleOwner.lifecycle.repeatOnLifecycle(minActiveState) {
+                // Subscribe first, then snapshot: a change written while the snapshot is read is
+                // queued rather than lost, and [window] tells which queued changes it contains.
+                val window = SnapshotWindow()
                 changes
-                    .onStart { emit(Rebuild()) }
+                    .onSubscription { emit(Rebuild()) }
                     .collect { change ->
+                        if (window.contains(change)) return@collect
+                        val uncertain = window.isUncertain(change)
                         when (change) {
-                            is Put -> handlePutInSortedList(list, change, entryCmp, filter)
-                            is Removed -> handleRemoveInSortedList(list, change, entryCmp)
+                            is Put ->
+                                if (uncertain) replaceKeyInSortedList(list, change.key, change.value, entryCmp, filter)
+                                else handlePutInSortedList(list, change, entryCmp, filter)
+                            is Removed ->
+                                if (uncertain) replaceKeyInSortedList(list, change.key, null, entryCmp, filter)
+                                else handleRemoveInSortedList(list, change, entryCmp)
                             is Cleared -> list.clear()
                             is Rebuild -> {
+                                val entries = window.snapshot(this@Es) { getSortedEntries() }
                                 list.clear()
-                                list.addAll(getSortedEntries())
+                                list.addAll(entries)
                             }
                         }
                     }
@@ -422,24 +442,58 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         // Helper: rebuild entire map from current state.
         // Reconciles in place (see [reconcileGroupedLists]) so each group's SnapshotStateList
         // instance stays stable across rebuilds — consumers may hold a child-list reference.
-        suspend fun rebuild() {
-            val grouped = mutableMapOf<SK, MutableList<Map.Entry<KeyType, ValueType>>>()
+        suspend fun rebuild(window: SnapshotWindow) {
+            val grouped = window.snapshot(this@Es) {
+                val grouped = mutableMapOf<SK, MutableList<Map.Entry<KeyType, ValueType>>>()
 
-            // Use suspend API to get entries (prevents runBlocking)
-            entries().forEach { entry ->
-                if (filter?.invoke(entry) != false) {
-                    (getSecondaryKey(groupByKey, entry.value) as? SK)?.let { secKeyValue ->
-                        grouped.getOrPut(secKeyValue) { mutableListOf() }.add(entry)
+                // Use suspend API to get entries (prevents runBlocking)
+                entries().forEach { entry ->
+                    if (filter?.invoke(entry) != false) {
+                        (getSecondaryKey(groupByKey, entry.value) as? SK)?.let { secKeyValue ->
+                            grouped.getOrPut(secKeyValue) { mutableListOf() }.add(entry)
+                        }
                     }
                 }
+                grouped
             }
 
             reconcileGroupedLists(map, grouped.mapValues { (_, entries) -> entries.sortedWith(entryComparator) })
         }
 
+        // Helper: put [key]'s row into the state [value] (null: absent) without trusting any
+        // previous value — for changes the last snapshot may already contain (see [SnapshotWindow]).
+        suspend fun replaceKey(key: KeyType, value: ValueType?) {
+            for ((secKeyValue, list) in map.entries.toList()) {
+                val index = list.indexOfFirst { it.key == key }
+                if (index >= 0) {
+                    list.removeAt(index)
+                    removeIfEmpty(secKeyValue)
+                    break
+                }
+            }
+            if (value == null) return
+            val entry = MapEntry(key, value)
+            if (filter?.invoke(entry) == false) return
+            val secKeyValue = getSecondaryKey(groupByKey, value) as? SK ?: return
+            val list = getOrCreateList(secKeyValue)
+            list.add(findMappedInsertionPoint(list, entry, entryComparator), entry)
+        }
+
         LaunchedEffect(groupByKey, entryComparator, filter, minActiveState) {
             lifecycleOwner.lifecycle.repeatOnLifecycle(minActiveState) {
-                changes.onStart { emit(Rebuild()) }.collect { change ->
+                // Subscribe first, then snapshot — see asSnapshotStateList.
+                val window = SnapshotWindow()
+                changes.onSubscription { emit(Rebuild()) }.collect { change ->
+                    if (window.contains(change)) return@collect
+                    if (window.isUncertain(change)) {
+                        when (change) {
+                            is Put -> replaceKey(change.key, change.value)
+                            is Removed -> replaceKey(change.key, null)
+                            is Cleared -> map.clear()
+                            is Rebuild -> rebuild(window)
+                        }
+                        return@collect
+                    }
                     when (change) {
                         is Put -> {
                             val entry = MapEntry(change.key, change.value)
@@ -482,7 +536,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                         }
 
                         is Cleared -> map.clear()
-                        is Rebuild -> rebuild()
+                        is Rebuild -> rebuild(window)
                     }
                 }
             }
@@ -768,11 +822,9 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         val state = remember(key) { mutableStateOf<ValueType?>(null) }
 
         LaunchedEffect(key) {
-            // Initial fetch
-            state.value = get(key)
-
-            // Observe changes for this specific key
-            changes.collect { change ->
+            // Subscribe first, then fetch (the injected Rebuild), so a change written in between
+            // is queued rather than lost.
+            changes.onSubscription { emit(Rebuild()) }.collect { change ->
                 when (change) {
                     is Put -> if (change.key == key) state.value = change.value
                     is Removed -> if (change.key == key) state.value = null
@@ -1261,7 +1313,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         // Subscribe to primary collection changes
         LaunchedEffect(entryComparator, filterMap, minActiveState) {
             lifecycleOwner.lifecycle.repeatOnLifecycle(minActiveState) {
-                changes.onStart { emit(Rebuild()) }.collect { change ->
+                changes.onSubscription { emit(Rebuild()) }.collect { change ->
                     when (change) {
                         is Put -> {
                             // Primary entry added/updated → re-evaluate it
@@ -1572,7 +1624,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         // Subscribe to primary collection changes
         LaunchedEffect(groupByKey, entryComparator, filterMap, minActiveState) {
             lifecycleOwner.lifecycle.repeatOnLifecycle(minActiveState) {
-                changes.onStart { emit(Rebuild()) }.collect { change ->
+                changes.onSubscription { emit(Rebuild()) }.collect { change ->
                     when (change) {
                         is Put -> {
                             // Primary entry added/updated → re-evaluate it
@@ -1730,17 +1782,9 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         val resultMap = remember { mutableStateMapOf<KeyType, R>() }
 
         LaunchedEffect(*dependencies) {
-            // Clear and rebuild when dependencies change
-            resultMap.clear()
-            entries().forEach { entry ->
-                val transformed = transform(entry)
-                if (transformed != null) {
-                    resultMap[entry.key] = transformed
-                }
-            }
-
-            // Then listen to ongoing changes
-            changes.collect { change ->
+            // Subscribe first, then build (the injected Rebuild clears and refills on every
+            // (re)start), so a change written while the map is built is queued rather than lost.
+            changes.onSubscription { emit(TreeMap.MapChange.Rebuild()) }.collect { change ->
                 when (change) {
                     is TreeMap.MapChange.Put -> {
                         // Create Map.Entry for the changed value
@@ -2286,6 +2330,52 @@ private suspend fun <K : Any, V : Any> handlePutInSortedList(
         val insertIndex = findIndexInSortedList(list, change.key, change.value, comparator, true)
         list.add(insertIndex, entry)
     }
+}
+
+/**
+ * Puts [key]'s row in [list] into the state [value] (null: absent) without trusting any previous
+ * value: finds the current row by key (O(n)). For changes the last snapshot may already contain
+ * (see [SnapshotWindow]) — never leaves two rows for one key.
+ */
+private suspend fun <K : Any, V : Any> replaceKeyInSortedList(
+    list: SnapshotStateList<Map.Entry<K, V>>,
+    key: K,
+    value: V?,
+    comparator: Comparator<Map.Entry<K, V>>,
+    filter: (suspend (Map.Entry<K, V>) -> Boolean)?
+) {
+    val index = list.indexOfFirst { it.key == key }
+    if (index >= 0) list.removeAt(index)
+    if (value == null) return
+    val entry = MapEntry(key, value)
+    if (filter?.invoke(entry) == false) return
+    list.add(findMappedInsertionPoint(list, entry, comparator), entry)
+}
+
+/**
+ * Which queued changes a sorted view's last snapshot already contains.
+ *
+ * The view subscribes to [Es.changes] before reading its snapshot, so no change is lost; a change
+ * written while the snapshot was being read is then both queued and possibly in the snapshot.
+ * [snapshot] brackets the read with the change counter ([TreeMap.MapChange.seq]):
+ *  - `seq <= before`: happened before the read began — the snapshot has it, skip it ([contains]);
+ *  - `before < seq <= after`: happened during the read — apply it by key, trusting no previous
+ *    value ([isUncertain]);
+ *  - `seq > after`: happened after — apply it normally.
+ * A change numbered 0 (the view's own injected Rebuild) is never contained.
+ */
+private class SnapshotWindow {
+    private var before = 0L
+    private var after = 0L
+
+    suspend fun <T> snapshot(es: Es<*, *>, read: suspend () -> T): T {
+        before = es.lastChangeSeq()
+        return read().also { after = es.lastChangeSeq() }
+    }
+
+    fun contains(change: TreeMap.MapChange<*, *>): Boolean = change.seq in 1..before
+
+    fun isUncertain(change: TreeMap.MapChange<*, *>): Boolean = change.seq in (before + 1)..after
 }
 
 /**
