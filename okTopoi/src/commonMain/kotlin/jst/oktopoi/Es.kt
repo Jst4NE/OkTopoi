@@ -21,11 +21,15 @@ import jst.oktopoi.TreeMap.MapChange.Cleared
 import jst.oktopoi.TreeMap.MapChange.Put
 import jst.oktopoi.TreeMap.MapChange.Rebuild
 import jst.oktopoi.TreeMap.MapChange.Removed
+import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -149,14 +153,21 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
     /** The number of the last change emitted — read around a snapshot (see [MapChange.seq]). */
     internal fun lastChangeSeq(): Long = changeSeq.load()
+
+    // Catch-up after a change-buffer overflow (see [emitChange]).
+    private val catchUpPending = AtomicBoolean(false)
+    private val lastDroppedSeq = AtomicLong(0L)
+    private val catchUpScope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.Default) }
     
     /**
      * Flow of changes made to this Es.
      * Useful for reactive programming and implementing persistence.
      * 
-     * **Backpressure handling:** This flow has a limited buffer. If consumers are too slow
-     * and the buffer overflows, an exception will be thrown. Slow consumers should add
-     * buffering to their flow chain: `collection.changes.buffer(10000).collect { ... }`
+     * **Backpressure handling:** each subscriber may fall at most
+     * [OkTopoiConstants.DEFAULT_CHANGE_FLOW_BUFFER_SIZE] changes behind. Beyond that, changes
+     * cannot reach it; writes still succeed, and a single catch-up [MapChange.Rebuild] is
+     * delivered once there is room (see [emitChange]). Consumers must handle Rebuild by
+     * re-reading current state; never `conflate()` this flow.
      */
     val changes: SharedFlow<MapChange<KeyType, ValueType>> = _changeFlow.asSharedFlow()
 
@@ -194,13 +205,46 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     /**
      * Emit a change notification to the flow.
      * Suppressed (except for Rebuild) while inside a bulk operation.
+     *
+     * If a subscriber is a full buffer behind, the change cannot be delivered to it. Throwing
+     * would fail a write that has already been applied (in memory, on disk, in sync state) and
+     * still lose the event, so instead the change is recorded as dropped and a catch-up
+     * [Rebuild] is scheduled (see [deliverCatchUpRebuild]).
      */
     protected fun emitChange(change: MapChange<KeyType, ValueType>) {
         if (bulkChangeDepth.load() > 0 && change !is Rebuild) return
         change.seq = changeSeq.incrementAndFetch()
-        val success = _changeFlow.tryEmit(change)
-        if (!success) {
-            throw IllegalStateException("Change flow buffer overflow. Consider increasing buffer size or adding .buffer() to your flow consumer.")
+        if (_changeFlow.tryEmit(change)) return
+
+        while (true) {
+            val dropped = lastDroppedSeq.load()
+            if (change.seq <= dropped || lastDroppedSeq.compareAndSet(dropped, change.seq)) break
+        }
+        if (catchUpPending.compareAndSet(false, true)) {
+            log.w {
+                "Change buffer full on ${this::class.simpleName}: a subscriber is " +
+                    "${OkTopoiConstants.DEFAULT_CHANGE_FLOW_BUFFER_SIZE} changes behind; " +
+                    "delivering a catch-up Rebuild once it has room"
+            }
+            catchUpScope.launch { deliverCatchUpRebuild() }
+        }
+    }
+
+    /**
+     * Emits Rebuilds, suspending until there is room, until one is numbered after every dropped
+     * change. A Rebuild covers every change numbered before it: that change was applied before
+     * its number was taken, and a consumer answers the Rebuild — later — by re-reading current
+     * state. [catchUpPending] stays set while a Rebuild is being delivered, so one coroutine
+     * serves a whole overflow episode; a drop after it resets the flag starts a new one.
+     */
+    private suspend fun deliverCatchUpRebuild() {
+        while (true) {
+            val rebuild = Rebuild<KeyType, ValueType>()
+            rebuild.seq = changeSeq.incrementAndFetch()
+            _changeFlow.emit(rebuild)
+            catchUpPending.store(false)
+            if (lastDroppedSeq.load() < rebuild.seq) return
+            if (!catchUpPending.compareAndSet(false, true)) return
         }
     }
     

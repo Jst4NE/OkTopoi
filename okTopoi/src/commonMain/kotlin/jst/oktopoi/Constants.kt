@@ -14,20 +14,11 @@ object OkTopoiConstants {
      * Default buffer capacity for change flows in Es collections.
      * This buffer holds change events for reactive consumers.
      * 
-     * When the buffer overflows, an exception is thrown to prevent memory issues.
-     * For high-throughput scenarios or slow consumers, increase buffer size on consumer side:
-     * 
-     * ```kotlin
-     * // Add larger buffer capacity when collecting changes
-     * collection.changes.buffer(10000).collect { change ->
-     *     // Process change events with larger buffer
-     * }
-     * 
-     * // Or use conflated buffer to keep only latest changes
-     * collection.changes.conflate().collect { change ->
-     *     // Always get most recent change, drops intermediates
-     * }
-     * ```
+     * When a subscriber falls this far behind, further changes cannot reach it; the write still
+     * succeeds, and the collection delivers a single catch-up Rebuild once there is room (see
+     * `Es.emitChange`), which consumers answer by re-reading current state. A consumer must
+     * therefore handle Rebuild; it must not `conflate()` the flow, which drops Put/Removed
+     * events with no Rebuild to repair them.
      */
     const val DEFAULT_CHANGE_FLOW_BUFFER_SIZE = 2048
     
