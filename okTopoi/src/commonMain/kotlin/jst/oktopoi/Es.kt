@@ -1014,6 +1014,8 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      *
      * @param key the key to observe
      * @param dependencies optional dependencies that trigger re-transformation when changed
+     *        Values [transform] captures need not be listed: the plugin gives it a new identity
+     *        when one changes, which recomputes too. List only triggers it does not capture.
      * @param transform suspend function to transform the value (receives null if key not found)
      * @return reactive State that updates when source or dependencies change
      */
@@ -1026,7 +1028,9 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         val sourceState = asState(key)
         val transformedState = remember { mutableStateOf<T?>(null) }
 
-        LaunchedEffect(sourceState.value, *dependencies) {
+        // Keyed on transform too: the plugin gives it a new identity when a value it captures
+        // changes, so a change a caller didn't list in [dependencies] still recomputes.
+        LaunchedEffect(sourceState.value, transform, *dependencies) {
             transformedState.value = transform(sourceState.value)
         }
 
@@ -1095,6 +1099,8 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      * - **Joined queries**: Use `asSnapshotStateListWithJoins()` for multi-collection queries
      *
      * @param dependencies optional dependencies that trigger re-transformation when changed
+     *        Values [transform] captures need not be listed: the plugin gives it a new identity
+     *        when one changes, which recomputes too. List only triggers it does not capture.
      * @param transform suspend function that receives the Es collection and returns computed value
      * @return reactive State that updates only when dependencies change
      */
@@ -1105,7 +1111,8 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     ): State<T?> {
         val transformedState = remember { mutableStateOf<T?>(null) }
 
-        LaunchedEffect(*dependencies) {
+        // Keyed on transform too — see mapState(key, …).
+        LaunchedEffect(transform, *dependencies) {
             transformedState.value = transform(this@Es)
         }
 
@@ -1718,6 +1725,8 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      *
      * @param R the type of the transformed result values
      * @param dependencies optional dependencies that trigger re-transformation of all entries when changed
+     *        Values [transform] captures need not be listed: the plugin gives it a new identity
+     *        when one changes, which recomputes too. List only triggers it does not capture.
      * @param transform suspend function that transforms each entry (receives full Map.Entry with key and value)
      * @return reactive SnapshotStateMap<KeyType, R> that updates when entries or dependencies change
      */
@@ -1728,7 +1737,8 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
     ): SnapshotStateMap<KeyType, R> {
         val resultMap = remember { mutableStateMapOf<KeyType, R>() }
 
-        LaunchedEffect(*dependencies) {
+        // Keyed on transform too — see mapState(key, …).
+        LaunchedEffect(transform, *dependencies) {
             // Subscribe first, then build (the injected Rebuild clears and refills on every
             // (re)start), so a change written while the map is built is queued rather than lost.
             changes.onSubscription { emit(TreeMap.MapChange.Rebuild()) }.collect { change ->
