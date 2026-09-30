@@ -463,20 +463,27 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         // Helper: put [key]'s row into the state [value] (null: absent) without trusting any
         // previous value — for changes the last snapshot may already contain (see [SnapshotWindow]).
         suspend fun replaceKey(key: KeyType, value: ValueType?) {
+            // Filter first (it suspends), then remove and re-insert without suspending, dropping
+            // the old group only after the re-insert (keeps a one-entry group's list instance).
+            val entry = value?.let { MapEntry(key, it) }
+            val newGroup = if (entry != null && filter?.invoke(entry) != false) {
+                getSecondaryKey(groupByKey, entry.value) as? SK
+            } else null
+
+            var oldGroup: SK? = null
             for ((secKeyValue, list) in map.entries.toList()) {
                 val index = list.indexOfFirst { it.key == key }
                 if (index >= 0) {
                     list.removeAt(index)
-                    removeIfEmpty(secKeyValue)
+                    oldGroup = secKeyValue
                     break
                 }
             }
-            if (value == null) return
-            val entry = MapEntry(key, value)
-            if (filter?.invoke(entry) == false) return
-            val secKeyValue = getSecondaryKey(groupByKey, value) as? SK ?: return
-            val list = getOrCreateList(secKeyValue)
-            list.add(findMappedInsertionPoint(list, entry, entryComparator), entry)
+            if (entry != null && newGroup != null) {
+                val list = getOrCreateList(newGroup)
+                list.add(findMappedInsertionPoint(list, entry, entryComparator), entry)
+            }
+            oldGroup?.let { removeIfEmpty(it) }
         }
 
         LaunchedEffect(groupByKey, entryComparator, filter, minActiveState) {
@@ -489,7 +496,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                         when (change) {
                             is Put -> replaceKey(change.key, change.value)
                             is Removed -> replaceKey(change.key, null)
-                            is Cleared -> map.clear()
+                            is Cleared -> clearGroupedLists(map)
                             is Rebuild -> rebuild(window)
                         }
                         return@collect
@@ -501,6 +508,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                             val secKeyValue = getSecondaryKey(groupByKey, entry.value) as? SK
 
                             // Handle old value removal (if secondary key changed)
+                            var oldGroup: SK? = null
                             if (change.isUpdate && change.oldValue != null) {
                                 val oldSecKeyValue = getSecondaryKey(groupByKey, change.oldValue) as? SK
                                 oldSecKeyValue?.let { oldKey ->
@@ -510,7 +518,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                                             Removed(change.key, change.oldValue),
                                             entryComparator
                                         )
-                                        removeIfEmpty(oldKey)
+                                        oldGroup = oldKey
                                     }
                                 }
                             }
@@ -524,6 +532,11 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                                     null // Filter already applied above
                                 )
                             }
+
+                            // Drop the old group only after the re-insert: an update within a
+                            // one-entry group must keep that group's list instance (a consumer
+                            // may hold it), not drop it and create a new one.
+                            oldGroup?.let { removeIfEmpty(it) }
                         }
 
                         is Removed -> {
@@ -535,7 +548,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                             }
                         }
 
-                        is Cleared -> map.clear()
+                        is Cleared -> clearGroupedLists(map)
                         is Rebuild -> rebuild(window)
                     }
                 }
@@ -837,25 +850,6 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         return state
     }
 
-    @Composable
-    fun asState(key: KeyType, initialValue: ValueType? = null): State<ValueType?> {
-        val state = remember(key) { mutableStateOf(initialValue) }
-
-        LaunchedEffect(key) {
-            // Observe changes for this specific key
-            changes.collect { change ->
-                when (change) {
-                    is Put -> if (change.key == key) state.value = change.value
-                    is Removed -> if (change.key == key) state.value = null
-                    is Cleared -> state.value = null
-                    is Rebuild -> state.value = get(key)
-                }
-            }
-        }
-
-        return state
-    }
-
     /**
      * Creates a non-reactive State snapshot of a value at a specific key.
      *
@@ -985,68 +979,6 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         @WrapInRemember transform: suspend (ValueType?) -> T?
     ): State<T?> {
         val sourceState = asState(key)
-        val transformedState = remember { mutableStateOf<T?>(null) }
-
-        LaunchedEffect(sourceState.value, *dependencies) {
-            transformedState.value = transform(sourceState.value)
-        }
-
-        return transformedState
-    }
-
-    /**
-     * Creates a reactive State that transforms a value at a specific key using a suspend function,
-     * with an initial value to prevent null state during first fetch.
-     *
-     * This overload is identical to `mapState(key, dependencies, transform)` but accepts an
-     * `initialValue` that will be used immediately until the actual value is fetched. This is
-     * useful for preventing flickering or showing placeholder data during the initial load.
-     *
-     * ## Key Differences from Base mapState
-     *
-     * - **Initial state**: Uses `initialValue` immediately instead of null
-     * - **First render**: Shows transformed `initialValue` before actual data arrives
-     * - **Use case**: Prevent flicker when you have a reasonable default/placeholder
-     *
-     * ## Use Cases
-     *
-     * - Showing placeholder data during initial load
-     * - Pre-filling forms with default values
-     * - Preventing "flash of empty content"
-     * - Any scenario where null state is undesirable
-     *
-     * ## Example
-     *
-     * ```kotlin
-     * @Composable
-     * fun OrderCard(orderId: Long) {
-     *     // Use placeholder order to prevent empty state during load
-     *     val placeholderOrder = OrderDto(id = orderId, startTime = Clock.System.now(), ...)
-     *
-     *     val displayName by Data.orders.mapState(
-     *         key = orderId,
-     *         initialValue = placeholderOrder
-     *     ) { order ->
-     *         order?.getDisplayName() ?: "Loading..."
-     *     }
-     *     Text(displayName)
-     * }
-     * ```
-     *
-     * @param key the key to observe
-     * @param initialValue the initial value to use before actual data is fetched
-     * @param dependencies optional dependencies that trigger re-transformation when changed
-     * @param transform suspend function to transform the value
-     * @return reactive State that updates when source or dependencies change
-     */
-    @Composable
-    fun <T> mapState(
-        key: KeyType,
-        initialValue: ValueType? = null,
-        vararg dependencies: Any?,
-        @WrapInRemember transform: suspend (ValueType?) -> T?
-    ): State<T?> {
-        val sourceState = asState(key, initialValue)
         val transformedState = remember { mutableStateOf<T?>(null) }
 
         LaunchedEffect(sourceState.value, *dependencies) {
@@ -1253,7 +1185,6 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
 
         // Helper: rebuild entire list from current state
         suspend fun rebuild() = mutationMutex.withLock {
-            resultList.clear()
             dependencyTracker.clear()
 
             val results = mutableListOf<Map.Entry<KeyType, T>>()
@@ -1272,8 +1203,11 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                 }
             }
 
-            // Sort and add to list
-            resultList.addAll(results.sortedWith(entryComparator))
+            // Swap in one step, after every suspending filterMap: clearing up front would let a
+            // frame render the list empty or half-built while the rebuild runs.
+            val sorted = results.sortedWith(entryComparator)
+            resultList.clear()
+            resultList.addAll(sorted)
         }
 
         // Helper: re-evaluate a specific primary entry
@@ -1646,7 +1580,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                         }
 
                         is Cleared -> mutationMutex.withLock {
-                            resultMap.clear()
+                            clearGroupedLists(resultMap)
                             dependencyTracker.clear()
                             primaryToGroup.clear()
                         }
@@ -1806,14 +1740,17 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
                         resultMap.clear()
                     }
                     is TreeMap.MapChange.Rebuild -> {
-                        // Rebuild entire map
-                        resultMap.clear()
+                        // Rebuild entire map off to the side, then swap in one step: clearing
+                        // first would let a frame render it empty while transform() suspends.
+                        val rebuilt = mutableMapOf<KeyType, R>()
                         entries().forEach { entry ->
                             val transformed = transform(entry)
                             if (transformed != null) {
-                                resultMap[entry.key] = transformed
+                                rebuilt[entry.key] = transformed
                             }
                         }
+                        resultMap.clear()
+                        resultMap.putAll(rebuilt)
                     }
                 }
             }
@@ -2344,12 +2281,12 @@ private suspend fun <K : Any, V : Any> replaceKeyInSortedList(
     comparator: Comparator<Map.Entry<K, V>>,
     filter: (suspend (Map.Entry<K, V>) -> Boolean)?
 ) {
+    // Filter first (it suspends), then remove and re-insert without suspending.
+    val entry = value?.let { MapEntry(key, it) }
+    val passes = entry != null && filter?.invoke(entry) != false
     val index = list.indexOfFirst { it.key == key }
     if (index >= 0) list.removeAt(index)
-    if (value == null) return
-    val entry = MapEntry(key, value)
-    if (filter?.invoke(entry) == false) return
-    list.add(findMappedInsertionPoint(list, entry, comparator), entry)
+    if (passes) list.add(findMappedInsertionPoint(list, entry!!, comparator), entry)
 }
 
 /**

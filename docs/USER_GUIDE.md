@@ -432,7 +432,7 @@ Reactivity stays granular: only groups whose contents actually changed recompose
 
 Two behaviors to know:
 - A group with no items has **no map entry** — `map[key]` is `null` until the first item arrives, and the key is removed again when the group empties. Read `map[key] ?: emptyList()`.
-- If you hold a reference to a group's list and that group later empties, the key is removed from the map and your held reference becomes a detached, empty list. Re-read `map[key]` (don't cache it past an empty transition) to observe the group reappearing.
+- If you hold a reference to a group's list and that group later empties — its last item removed or moved to another group, a rebuild that no longer produces it, or the collection cleared — the key is removed from the map and your held reference becomes a detached, empty list. Re-read `map[key]` (don't cache it past an empty transition) to observe the group reappearing. An update to an item that stays in its group is not an empty transition, even when it is the group's only item: the list instance is kept.
 
 ### Pre-filtering for performance
 

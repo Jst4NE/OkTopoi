@@ -291,23 +291,18 @@ fun <T : Any> mergedSnapshotStateList(
         val currentValue = typedEs.get(key)
         val mergeKey = MergeKey(sourceIndex, key)
 
-        // Remove old projected value
+        // Project first — it suspends, and the old item must stay listed meanwhile — then
+        // replace old with new without suspending, so no frame renders the item missing.
+        val projected = currentValue?.let { projectEntry(sourceIndex, key, it) }
         removeFromList(mergeKey)
+        if (projected != null) insertIntoList(mergeKey, projected)
 
-        if (currentValue != null) {
-            val projected = projectEntry(sourceIndex, key, currentValue)
-            if (projected != null) {
-                insertIntoList(mergeKey, projected)
-            }
-        } else {
-            // Entry was removed from source
-            dependencyTracker.removePrimaryEntry(mergeKey)
-        }
+        // Entry was removed from source
+        if (currentValue == null) dependencyTracker.removePrimaryEntry(mergeKey)
     }
 
     // --- Helper: full rebuild ---
     suspend fun rebuild() {
-        resultList.clear()
         keyToValue.clear()
         dependencyTracker.clear()
 
@@ -325,10 +320,11 @@ fun <T : Any> mergedSnapshotStateList(
         }
 
         allItems.sortWith(compareBy(comparator) { it.second })
-        allItems.forEach { (mergeKey, value) ->
-            keyToValue[mergeKey] = value
-            resultList.add(value)
-        }
+        allItems.forEach { (mergeKey, value) -> keyToValue[mergeKey] = value }
+        // Swap in one step, after every suspending projection: clearing up front would let a
+        // frame render the list empty or half-built while the rebuild runs.
+        resultList.clear()
+        resultList.addAll(allItems.map { it.second })
     }
 
     // --- Collector coroutine: single consumer of all events ---
@@ -547,12 +543,14 @@ fun <G : Any, T : Any> mergedSnapshotStateMap(
         return projected
     }
 
-    fun removeFromGroup(mergeKey: MergeKey) {
-        val (oldGroup, oldValue) = keyToGroupAndValue.remove(mergeKey) ?: return
-        val list = resultMap[oldGroup] ?: return
+    /** Removes [mergeKey]'s item; returns its group. [dropIfEmpty] drops the group if emptied. */
+    fun removeFromGroup(mergeKey: MergeKey, dropIfEmpty: Boolean = true): G? {
+        val (oldGroup, oldValue) = keyToGroupAndValue.remove(mergeKey) ?: return null
+        val list = resultMap[oldGroup] ?: return oldGroup
         val index = list.indexOfFirst { it === oldValue }
         if (index >= 0) list.removeAt(index)
-        removeIfEmpty(oldGroup)
+        if (dropIfEmpty) removeIfEmpty(oldGroup)
+        return oldGroup
     }
 
     fun insertIntoGroup(mergeKey: MergeKey, groupKey: G, value: T) {
@@ -567,19 +565,20 @@ fun <G : Any, T : Any> mergedSnapshotStateMap(
         val currentValue = typedEs.get(key)
         val mergeKey = MergeKey(sourceIndex, key)
 
-        removeFromGroup(mergeKey)
+        // Project first — it suspends, and the old item must stay listed meanwhile.
+        val groupKey = currentValue?.let { extractGroupKey(sourceIndex, it) }
+        val projected = if (currentValue != null && groupKey != null) {
+            projectEntry(sourceIndex, key, currentValue)
+        } else null
 
-        if (currentValue != null) {
-            val groupKey = extractGroupKey(sourceIndex, currentValue)
-            if (groupKey != null) {
-                val projected = projectEntry(sourceIndex, key, currentValue)
-                if (projected != null) {
-                    insertIntoGroup(mergeKey, groupKey, projected)
-                }
-            }
-        } else {
-            dependencyTracker.removePrimaryEntry(mergeKey)
-        }
+        // Then replace old with new without suspending, and drop the old group only after the
+        // re-insert: an update within a one-item group must keep that group's list instance
+        // (a consumer may hold it), not drop it and create a new one.
+        val oldGroup = removeFromGroup(mergeKey, dropIfEmpty = false)
+        if (projected != null) insertIntoGroup(mergeKey, groupKey!!, projected)
+        if (oldGroup != null) removeIfEmpty(oldGroup)
+
+        if (currentValue == null) dependencyTracker.removePrimaryEntry(mergeKey)
     }
 
     suspend fun rebuild() {
@@ -810,8 +809,19 @@ private fun <T> findInsertionPointInList(
  * preserves the instances, so per-group lists are safe to hold/capture.
  *
  * Unchanged groups are skipped (element-wise value equality) so they trigger no recomposition;
- * groups with no remaining items are removed. [sortedGrouped] must already be sorted.
+ * groups with no remaining items are removed — emptied first, so a consumer still holding one
+ * sees it empty rather than frozen with rows that no longer exist (the clear is a single state
+ * write, not per element). [sortedGrouped] must already be sorted.
  */
+/**
+ * Drops every group of a grouped reactive map, emptying each list first so a consumer still
+ * holding one sees it empty rather than frozen with rows that no longer exist.
+ */
+internal fun <G, V> clearGroupedLists(resultMap: SnapshotStateMap<G, SnapshotStateList<V>>) {
+    resultMap.values.forEach { it.clear() }
+    resultMap.clear()
+}
+
 internal fun <G, V> reconcileGroupedLists(
     resultMap: SnapshotStateMap<G, SnapshotStateList<V>>,
     sortedGrouped: Map<G, List<V>>,
@@ -819,7 +829,7 @@ internal fun <G, V> reconcileGroupedLists(
     // Remove groups that no longer have any items (snapshot the keys first to avoid mutating
     // the map while iterating it).
     val liveKeys = sortedGrouped.keys
-    resultMap.keys.filter { it !in liveKeys }.toList().forEach { resultMap.remove(it) }
+    resultMap.keys.filter { it !in liveKeys }.toList().forEach { resultMap.remove(it)?.clear() }
 
     sortedGrouped.forEach { (groupKey, newItems) ->
         val existing = resultMap[groupKey]
