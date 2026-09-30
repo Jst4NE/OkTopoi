@@ -160,9 +160,10 @@ private sealed interface MergeEvent {
         val change: TreeMap.MapChange<*, *>,
     ) : MergeEvent
 
-    /** A join dependency changed — re-evaluate affected merge keys. */
+    /** A join dependency collection changed — re-evaluate the merge keys it affects. */
     data class DependencyChange(
-        val affectedKeys: Set<MergeKey>,
+        val es: Es<*, *>,
+        val change: TreeMap.MapChange<*, *>,
     ) : MergeEvent
 
     /** Full rebuild requested (e.g., on initial subscription). */
@@ -258,7 +259,7 @@ fun <T : Any> mergedSnapshotStateList(
         val entry = MapEntry(key, value)
         // Fast pre-filter: reject before expensive projection
         if (!source.filter(entry)) return null
-        val context = JoinContext()
+        val context = JoinContext(dependencyTracker)
         val projected = source.project(entry, context)
         val mergeKey = MergeKey(sourceIndex, key)
         dependencyTracker.recordDependencies(mergeKey, context.dependencies)
@@ -347,21 +348,11 @@ fun <T : Any> mergedSnapshotStateList(
 
                 // Launch dependency tracker subscription
                 launch {
-                    dependencyTracker.subscribeToAllDependencies(
-                        onDependencyChange = { dependencyEs, dependencyKey, oldValue, newValue ->
-                            val affectedKeys = dependencyTracker.getPrimaryKeysDependingOn<Any>(
-                                dependencyEs, dependencyKey, oldValue, newValue
-                            )
-                            if (affectedKeys.isNotEmpty()) {
-                                eventChannel.send(MergeEvent.DependencyChange(affectedKeys))
-                            }
-                        },
-                        onBatchReevaluate = { primaryKeys ->
-                            if (primaryKeys.isNotEmpty()) {
-                                eventChannel.send(MergeEvent.DependencyChange(primaryKeys))
-                            }
-                        }
-                    )
+                    // Resolved in the event loop below, where every evaluation runs, so an
+                    // evaluation's recorded dependencies are complete when the change is looked up.
+                    dependencyTracker.subscribeToAllDependencies { dependencyEs, change ->
+                        eventChannel.send(MergeEvent.DependencyChange(dependencyEs, change))
+                    }
                 }
 
                 // Single collector — all list mutations happen here
@@ -404,7 +395,7 @@ fun <T : Any> mergedSnapshotStateList(
                             }
                         }
                         is MergeEvent.DependencyChange -> {
-                            event.affectedKeys.forEach { mergeKey ->
+                            dependencyTracker.primaryKeysAffectedBy(event.es, event.change).forEach { mergeKey ->
                                 reEvaluateEntry(mergeKey.sourceIndex, mergeKey.originalKey)
                             }
                         }
@@ -536,7 +527,7 @@ fun <G : Any, T : Any> mergedSnapshotStateMap(
         val entry = MapEntry(key, value)
         // Fast pre-filter: reject before expensive projection
         if (!source.filter(entry)) return null
-        val context = JoinContext()
+        val context = JoinContext(dependencyTracker)
         val projected = source.project(entry, context)
         val mergeKey = MergeKey(sourceIndex, key)
         dependencyTracker.recordDependencies(mergeKey, context.dependencies)
@@ -650,21 +641,11 @@ fun <G : Any, T : Any> mergedSnapshotStateMap(
 
                 // Launch dependency tracker subscription
                 launch {
-                    dependencyTracker.subscribeToAllDependencies(
-                        onDependencyChange = { dependencyEs, dependencyKey, oldValue, newValue ->
-                            val affectedKeys = dependencyTracker.getPrimaryKeysDependingOn<Any>(
-                                dependencyEs, dependencyKey, oldValue, newValue
-                            )
-                            if (affectedKeys.isNotEmpty()) {
-                                eventChannel.send(MergeEvent.DependencyChange(affectedKeys))
-                            }
-                        },
-                        onBatchReevaluate = { primaryKeys ->
-                            if (primaryKeys.isNotEmpty()) {
-                                eventChannel.send(MergeEvent.DependencyChange(primaryKeys))
-                            }
-                        }
-                    )
+                    // Resolved in the event loop below, where every evaluation runs, so an
+                    // evaluation's recorded dependencies are complete when the change is looked up.
+                    dependencyTracker.subscribeToAllDependencies { dependencyEs, change ->
+                        eventChannel.send(MergeEvent.DependencyChange(dependencyEs, change))
+                    }
                 }
 
                 // Single collector
@@ -708,7 +689,7 @@ fun <G : Any, T : Any> mergedSnapshotStateMap(
                             }
                         }
                         is MergeEvent.DependencyChange -> {
-                            event.affectedKeys.forEach { mergeKey ->
+                            dependencyTracker.primaryKeysAffectedBy(event.es, event.change).forEach { mergeKey ->
                                 reEvaluateEntry(mergeKey.sourceIndex, mergeKey.originalKey)
                             }
                         }

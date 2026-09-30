@@ -356,6 +356,15 @@ under the write lock after the mutation. Changes numbered at or below the counte
 the snapshot are skipped, those numbered within the read are applied by key (an O(n) scan, but
 the window is short), and later ones take the normal O(log n) path.
 
+Join dependencies follow the same rule, with the read before the subscription by necessity: a
+view learns which collections an entry depends on only by running its `filterMap`. `JoinContext`
+therefore reports each collection's change counter, read before its first fetch from it, to the
+`JoinDependencyTracker`, which subscribes at once (woken by that report, no polling) and, once
+registered, compares the counter: if it moved, it hands on a `Rebuild` of that collection so its
+dependents re-evaluate. Affected entries are resolved where the view serializes evaluation (the
+join's mutation lock, the merged view's event loop), so an evaluation still running — its
+dependencies are recorded when it finishes — completes first and is found.
+
 #### Performance Characteristics
 
 - **asSnapshotStateList**: O(n) initial, O(log n) per update
