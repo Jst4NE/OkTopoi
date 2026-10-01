@@ -372,6 +372,7 @@ override fun fromPersistString(string: String, fileName: String) {
         onBeforeFromSync(key, value, timestamp, force)
 
         var oldValue: ValueType? = null
+        var applied = value
         val synced = withWriteLock {
             // Capture before any mutation (and before the timestamp-rejection early return,
             // where the current value IS the old value) — getUnsafe is only safe under the lock.
@@ -379,9 +380,16 @@ override fun fromPersistString(string: String, fileName: String) {
 
             // Pending deletes are stored negated; compare against when the pending edit happened,
             // whichever kind it is — raw, every incoming version would beat a pending delete.
-            val currentTimestamp = unsyncedKeysMap[key]?.timestamp?.absoluteValue ?: 0L
+            val pending = unsyncedKeysMap[key]
+            val currentTimestamp = pending?.timestamp?.absoluteValue ?: 0L
 
             log.d { "[${this@Esps.callingClassName}.${this@Esps.propertyName}] currentTimestamp: $currentTimestamp; incomingTimestamp: $timestamp" }
+
+            val merged = if (force) null else mergeIntoPendingUnsafe(key, pending, oldValue, value, timestamp > currentTimestamp)
+            if (merged != null) {
+                applied = merged
+                return@withWriteLock true
+            }
 
             if (!force && timestamp <= currentTimestamp) {
                 return@withWriteLock false
@@ -391,8 +399,67 @@ override fun fromPersistString(string: String, fileName: String) {
             true
         }
 
-        onAfterFromSync(key, oldValue, value, timestamp, synced)
+        onAfterFromSync(key, oldValue, applied, timestamp, synced)
         return synced
+    }
+
+    /**
+     * Field-level merge of an incoming version into a pending local edit, so neither side's
+     * changes to different fields are lost: without it, a newer incoming version replaced the
+     * whole entry (discarding the edit) and an older one was dropped whole.
+     *
+     * Return the incoming [remote] with the fields [local] changed relative to [base] carried
+     * over. For a field both changed, [remoteWins] (the incoming version is newer than the edit)
+     * decides. Return null to decline: the plain timestamp rule then applies. Decline whenever
+     * [remote] is not newer than [base] — a re-delivery of state the edit already saw would
+     * otherwise read as remote changes and undo newer fields.
+     *
+     * Called under the write lock: must not suspend or touch this store. Default: no merge.
+     */
+    protected open fun mergePending(base: ValueType, local: ValueType, remote: ValueType, remoteWins: Boolean): ValueType? = null
+
+    /**
+     * Applies [mergePending] for an incoming [remote] version of a pending, non-deleted entry
+     * with a sync base. Returns the value now held, or null if no merge happened. Caller holds
+     * the write lock.
+     *
+     * The merge stays pending (its edit time unchanged) with [remote] as its new base, so the next
+     * write sends exactly the local changes. A merge equal to [remote] has nothing left to send
+     * and settles as synced. A write of this key still in flight finds the entry changed and
+     * keeps it pending, re-basing it on what it sent; the next write may then resend some of
+     * [remote]'s fields with the values the server already holds.
+     */
+    private fun mergeIntoPendingUnsafe(
+        key: KeyType,
+        pending: UnsyncedEntry<ValueType>?,
+        local: ValueType?,
+        remote: ValueType?,
+        remoteWins: Boolean,
+    ): ValueType? {
+        if (pending == null || pending.timestamp <= 0) return null
+        val base = pending.lastSyncedValue ?: return null
+        if (local == null || remote == null) return null
+        val merged = try {
+            mergePending(base, local, remote, remoteWins)
+        } catch (e: Exception) {
+            log.w(e) { "${propertyName}[$key] merge failed — falling back to the timestamp rule" }
+            null
+        } ?: return null
+
+        if (merged == remote) {
+            applySyncedUnsafe(key, remote)
+            return remote
+        }
+        // Re-base before the put: persistence reads the pending entry to store its sync state.
+        unsyncedKeysMap[key] = pending.copy(lastSyncedValue = remote)
+        inboundSuppressionDepth++
+        try {
+            putUnsafe(key, merged)
+        } finally {
+            inboundSuppressionDepth--
+        }
+        syncTrigger.tryEmit(Unit)
+        return merged
     }
 
     /**

@@ -587,8 +587,8 @@ between them leaves some applied and some not.
 
 ### How sync resolves conflicts
 
-Conflicts are resolved per entry, by timestamp: the newer one wins, and the value is replaced
-whole — there is no field-level merge. For `esps`:
+By default, conflicts are resolved per entry, by timestamp: the newer one wins, and the value is
+replaced whole. For `esps`:
 
 - no local edit pending → the incoming change is applied;
 - a pending local edit at least as new → the incoming change is ignored, and the local edit
@@ -598,8 +598,17 @@ whole — there is no field-level merge. For `esps`:
 
 Local edits are stamped with the device clock; incoming timestamps are whatever your
 `incomingSync` supplies, typically server time. Clock skew between the two therefore affects the
-outcome. This model fits data with one writer per entry; if two clients can edit the same entry
-concurrently, resolve that in your adapter or on the server.
+outcome. This model fits data with one writer per entry.
+
+For entries more than one party edits, a subclass of `Esps` can override `mergePending(base,
+local, remote, remoteWins)`. It is called when a version arrives for an entry with a pending edit
+(not a deletion) and a sync base: return the incoming version with the fields the edit changed
+relative to `base` carried over, and `remoteWins` decides a field both changed. The merge stays
+queued with the incoming version as its new base, so the next write carries exactly the local
+changes; a merge equal to the incoming version settles as synced. Return null to fall back to the
+rules above, and always for a version not newer than `base`: a re-delivered old version would
+otherwise read as remote changes and undo newer fields. It runs under the store's lock, so it must
+not suspend or call back into the store.
 
 Your own writes are judged by value, not by timestamp. When `outgoingSync` returns, the entry is
 marked synced only if it still holds the value that was sent; if it was edited while the write was
