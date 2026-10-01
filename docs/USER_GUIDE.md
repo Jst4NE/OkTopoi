@@ -110,8 +110,8 @@ val users = esps<String, User>(
 val user = users.get("alice")          // Get by primary key
 users.put("alice", User(...))          // Insert/update
 users.remove("alice")                  // Delete
-val allEntries = users.entries()       // All entries
-val allKeys = users.keys()             // All keys
+val allEntries = users.entries()       // All entries (a snapshot, in key order)
+val allKeys = users.keys()             // All keys (a snapshot)
 
 // Secondary index queries
 val engineers = users.getBy(User::department to "Engineering")

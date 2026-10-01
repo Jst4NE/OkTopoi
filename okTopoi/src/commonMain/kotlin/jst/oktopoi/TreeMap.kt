@@ -129,9 +129,6 @@ open class TreeMap<K, V> internal constructor(
     protected fun <T> withWriteLockBlocking(block: () -> T): T =
         runBlockingMultiplatform { rwLock.withWriteLock { block() } }
     
-    // Deletion tracking for resilient iterators
-    private var deleteModCountUnsafe = 0
-    
     // Secondary index management (moved from UnsafeTreeMapCore)
     private val secondaryKeyExtractors = mutableMapOf<String, (V) -> Any?>()
     private val secondaryIndexes = mutableMapOf<String, MutableMap<Any?, MutableSet<K>>>()
@@ -182,8 +179,7 @@ open class TreeMap<K, V> internal constructor(
      * @param oldValue the value that was removed
      */
     protected open fun onAfterRemoveUnsafe(key: K, oldValue: V) {
-        // TreeMap's responsibility: update secondary indexes and deletion tracking
-        deleteModCountUnsafe++
+        // TreeMap's responsibility: update secondary indexes
         updateSecondaryIndexes(key, oldValue, null)
     }
     
@@ -200,8 +196,7 @@ open class TreeMap<K, V> internal constructor(
      * Subclasses should override this for side effects that should happen after memory update.
      */
     protected open fun onAfterClearUnsafe() {
-        // TreeMap's responsibility: clear secondary indexes and deletion tracking
-        deleteModCountUnsafe++
+        // TreeMap's responsibility: clear secondary indexes
         secondaryIndexes.values.forEach { it.clear() }
     }
     
@@ -685,100 +680,27 @@ open class TreeMap<K, V> internal constructor(
     // Collection View Operations (suspend-based)
     // ========================================================================
 
-    suspend fun entries(): MutableSet<MapEntry<K, V>> =
-        rwLock.withReadLock { entriesUnsafe() }
+    // Each returns a copy taken under the read lock, in key order. The copy is what makes
+    // them safe: iterating the tree itself after the lock is released walks nodes that a
+    // concurrent write may be rebalancing or unlinking, which skips, repeats, or ends early.
 
-    override suspend fun keys(): MutableSet<K> =
-        rwLock.withReadLock { keysUnsafe() }
+    /** Returns a snapshot of all entries in key order. */
+    suspend fun entries(): List<Map.Entry<K, V>> = toList()
 
-    override suspend fun values(): MutableCollection<V> =
-        rwLock.withReadLock { valuesUnsafe() }
+    override suspend fun keys(): Set<K> =
+        rwLock.withReadLock {
+            val result = LinkedHashSet<K>(sizeUnsafe * 4 / 3 + 1)
+            forEachUnsafe { key, _ -> result.add(key) }
+            result
+        }
 
+    override suspend fun values(): List<V> =
+        rwLock.withReadLock {
+            val result = ArrayList<V>(sizeUnsafe)
+            forEachUnsafe { _, value -> result.add(value) }
+            result
+        }
 
-    // ========================================================================
-    // Resilient Iterator - Weakly consistent iteration with deletion tracking
-    // ========================================================================
-    
-    /**
-     * Base resilient iterator that provides weakly consistent iteration.
-     * Uses deleteModCount to detect deletions and recover position efficiently.
-     * 
-     * Features:
-     * - O(1) normal iteration when no deletions occur
-     * - O(log n) recovery only when deletions are detected
-     * - Iterator removes route through TreeMap hooks for consistency
-     * - Weakly consistent: sees snapshot at creation + recovers from deletions
-     */
-    private abstract inner class ResilientIterator<T> : MutableIterator<T> {
-        protected var expectedDeleteModCount: Int = 0
-        protected var nextNode: Node<K, V>? = null
-        protected var lastReturnedKey: K? = null
-        
-        init {
-            // Initialize under read lock to capture consistent state
-            runBlockingMultiplatform {
-                rwLock.withReadLock {
-                    expectedDeleteModCount = deleteModCountUnsafe
-                    nextNode = firstNodeUnsafe()
-                }
-            }
-        }
-        
-        override fun hasNext(): Boolean = runBlockingMultiplatform {
-            rwLock.withReadLock {
-                if (deleteModCountUnsafe != expectedDeleteModCount) {
-                    recoverFromDeletions()
-                }
-                nextNode != null
-            }
-        }
-        
-        override fun next(): T = runBlockingMultiplatform {
-            rwLock.withReadLock {
-                if (deleteModCountUnsafe != expectedDeleteModCount) {
-                    recoverFromDeletions()
-                }
-                
-                val node = nextNode ?: throw NoSuchElementException()
-                lastReturnedKey = node.key
-                nextNode = node.successor()
-                
-                extractValue(node)
-            }
-        }
-        
-        override fun remove() = runBlockingMultiplatform {
-            rwLock.withWriteLock {
-                val key = lastReturnedKey ?: throw IllegalStateException("next() must be called before remove()")
-                removeUnsafe(key)  // Goes through hooks, increments deleteModCount
-                expectedDeleteModCount = deleteModCountUnsafe  // Sync after our own change
-                lastReturnedKey = null
-            }
-        }
-        
-        /**
-         * Recovers iterator position after deletions.
-         * Uses ceilingNodeUnsafe for efficient O(log n) position recovery.
-         */
-        private fun recoverFromDeletions() {
-            nextNode = nextNode?.key?.let { key ->
-                ceilingNodeUnsafe(key)  // Single O(log n) operation
-            }
-            expectedDeleteModCount = deleteModCountUnsafe
-        }
-        
-        /**
-         * Extract the value from a node for this iterator type.
-         */
-        protected abstract fun extractValue(node: Node<K, V>): T
-    }
-    
-    /**
-     * Resilient iterator for entries.
-     */
-    private inner class ResilientEntryIterator : ResilientIterator<MapEntry<K, V>>() {
-        override fun extractValue(node: Node<K, V>): MapEntry<K, V> = MapEntry(node.key, node.value)
-    }
 
     override suspend fun size(): Int =
         rwLock.withReadLock { sizeUnsafe }
@@ -816,14 +738,7 @@ open class TreeMap<K, V> internal constructor(
 
     override suspend fun forEach(action: suspend (Map.Entry<K, V>) -> Unit) {
         // Collect entries under lock, then iterate outside lock to allow suspend actions
-        val entries = rwLock.withReadLock {
-            val list = mutableListOf<MapEntry<K, V>>()
-            forEachUnsafe { key, value ->
-                list.add(MapEntry(key, value))
-            }
-            list
-        }
-        entries.forEach { action(it) }
+        toList().forEach { action(it) }
     }
 
     override suspend fun filter(predicate: suspend (Map.Entry<K, V>) -> Boolean): List<Map.Entry<K, V>> {
@@ -854,7 +769,7 @@ open class TreeMap<K, V> internal constructor(
 
     override suspend fun toList(): List<Map.Entry<K, V>> {
         return rwLock.withReadLock {
-            val result = mutableListOf<Map.Entry<K, V>>()
+            val result = ArrayList<Map.Entry<K, V>>(sizeUnsafe)
             forEachUnsafe { key, value ->
                 result.add(MapEntry(key, value))
             }

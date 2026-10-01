@@ -252,14 +252,14 @@ interface SuspendMutableMap<K, V> {
     }
 
     /**
-     * Returns a list of all keys in the map.
+     * Returns a snapshot of all keys in the map, in key order.
      */
-    suspend fun keys(): MutableSet<K>
+    suspend fun keys(): Set<K>
 
     /**
-     * Returns a list of all values in the map.
+     * Returns a snapshot of all values in the map, in key order.
      */
-    suspend fun values(): MutableCollection<V>
+    suspend fun values(): List<V>
 
     // ========== Aggregation Operations ==========
 
