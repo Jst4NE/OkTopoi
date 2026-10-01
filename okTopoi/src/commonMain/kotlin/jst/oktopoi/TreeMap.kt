@@ -734,38 +734,10 @@ open class TreeMap<K, V> internal constructor(
     override suspend fun clear() =
         rwLock.withWriteLock { clearUnsafe() }
 
-    // Extended iteration operations
-
-    override suspend fun forEach(action: suspend (Map.Entry<K, V>) -> Unit) {
-        // Collect entries under lock, then iterate outside lock to allow suspend actions
-        toList().forEach { action(it) }
-    }
-
-    override suspend fun filter(predicate: suspend (Map.Entry<K, V>) -> Boolean): List<Map.Entry<K, V>> {
-        val result = mutableListOf<Map.Entry<K, V>>()
-        forEach { entry ->
-            if (predicate(entry)) {
-                result.add(entry)
-            }
-        }
-        return result
-    }
-
-    override suspend fun <R> map(transform: suspend (Map.Entry<K, V>) -> R): List<R> {
-        val result = mutableListOf<R>()
-        forEach { entry ->
-            result.add(transform(entry))
-        }
-        return result
-    }
-
-    override suspend fun <R : Any> mapNotNull(transform: suspend (Map.Entry<K, V>) -> R?): List<R> {
-        val result = mutableListOf<R>()
-        forEach { entry ->
-            transform(entry)?.let { result.add(it) }
-        }
-        return result
-    }
+    // Functional operations over a snapshot (toList), in key order. Final inline members
+    // rather than interface members: inlined, the lambdas may suspend like any loop body,
+    // with no suspend-lambda object or per-element continuation, and the snapshot means no
+    // lock is held while they run.
 
     override suspend fun toList(): List<Map.Entry<K, V>> {
         return rwLock.withReadLock {
@@ -777,33 +749,66 @@ open class TreeMap<K, V> internal constructor(
         }
     }
 
-    override suspend fun all(predicate: suspend (Map.Entry<K, V>) -> Boolean): Boolean {
-        val entries = toList()
-        for (entry in entries) {
-            if (!predicate(entry)) return false
-        }
-        return true
+    /** Performs [action] on each entry. */
+    suspend inline fun forEach(action: (Map.Entry<K, V>) -> Unit) = toList().forEach(action)
+
+    /** Performs [action] on each key-value pair. */
+    suspend inline fun forEachPair(action: (key: K, value: V) -> Unit) =
+        toList().forEach { action(it.key, it.value) }
+
+    /** Returns the entries matching [predicate]. */
+    suspend inline fun filter(predicate: (Map.Entry<K, V>) -> Boolean): List<Map.Entry<K, V>> =
+        toList().filter(predicate)
+
+    /** Returns the entries matching [predicate] as a map. */
+    suspend inline fun filterToMap(predicate: (Map.Entry<K, V>) -> Boolean): Map<K, V> {
+        val result = LinkedHashMap<K, V>()
+        toList().forEach { if (predicate(it)) result[it.key] = it.value }
+        return result
     }
 
-    override suspend fun any(predicate: suspend (Map.Entry<K, V>) -> Boolean): Boolean {
-        val entries = toList()
-        for (entry in entries) {
-            if (predicate(entry)) return true
-        }
-        return false
-    }
+    /** Returns the entries whose keys match [predicate]. */
+    suspend inline fun filterKeys(predicate: (K) -> Boolean): List<Map.Entry<K, V>> =
+        toList().filter { predicate(it.key) }
 
-    override suspend fun none(predicate: suspend (Map.Entry<K, V>) -> Boolean): Boolean {
-        return !any(predicate)
-    }
+    /** Returns the entries whose values match [predicate]. */
+    suspend inline fun filterValues(predicate: (V) -> Boolean): List<Map.Entry<K, V>> =
+        toList().filter { predicate(it.value) }
 
-    override suspend fun find(predicate: suspend (Map.Entry<K, V>) -> Boolean): Map.Entry<K, V>? {
-        val entries = toList()
-        for (entry in entries) {
-            if (predicate(entry)) return entry
-        }
-        return null
-    }
+    /** Returns the results of applying [transform] to each entry. */
+    suspend inline fun <R> map(transform: (Map.Entry<K, V>) -> R): List<R> = toList().map(transform)
+
+    /** Returns the results of applying [transform] to each key-value pair. */
+    suspend inline fun <R> mapPairs(transform: (key: K, value: V) -> R): List<R> =
+        toList().map { transform(it.key, it.value) }
+
+    /** Returns the non-null results of applying [transform] to each entry. */
+    suspend inline fun <R : Any> mapNotNull(transform: (Map.Entry<K, V>) -> R?): List<R> =
+        toList().mapNotNull(transform)
+
+    /** Returns `true` if all entries match [predicate]. */
+    suspend inline fun all(predicate: (Map.Entry<K, V>) -> Boolean): Boolean = toList().all(predicate)
+
+    /** Returns `true` if at least one entry matches [predicate]. */
+    suspend inline fun any(predicate: (Map.Entry<K, V>) -> Boolean): Boolean = toList().any(predicate)
+
+    /** Returns `true` if no entry matches [predicate]. */
+    suspend inline fun none(predicate: (Map.Entry<K, V>) -> Boolean): Boolean = toList().none(predicate)
+
+    /** Returns the number of entries matching [predicate]. */
+    suspend inline fun count(predicate: (Map.Entry<K, V>) -> Boolean): Int = toList().count(predicate)
+
+    /** Returns the first entry matching [predicate], or `null`. */
+    suspend inline fun find(predicate: (Map.Entry<K, V>) -> Boolean): Map.Entry<K, V>? =
+        toList().find(predicate)
+
+    /** Returns the first entry matching [predicate], or throws [NoSuchElementException]. */
+    suspend inline fun first(predicate: (Map.Entry<K, V>) -> Boolean): Map.Entry<K, V> =
+        toList().find(predicate) ?: throw NoSuchElementException("No entry matching predicate found")
+
+    /** Returns the first entry matching [predicate], or `null`. */
+    suspend inline fun firstOrNull(predicate: (Map.Entry<K, V>) -> Boolean): Map.Entry<K, V>? =
+        toList().find(predicate)
 }
 
 /** Property criteria as index-name criteria: each index is named after its property. */

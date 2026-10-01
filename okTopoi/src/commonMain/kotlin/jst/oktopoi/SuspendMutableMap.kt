@@ -167,75 +167,14 @@ interface SuspendMutableMap<K, V> {
         }
     }
 
-    // ========== Iteration & Collection Operations ==========
+    // ========== Snapshots ==========
+    //
+    // The functional operations (forEach, filter, map, any, …) live on TreeMap as final
+    // inline members: an interface member cannot be inline, and inlining is what lets their
+    // lambdas suspend without allocating a suspend lambda and a continuation per call.
 
     /**
-     * Performs the given [action] on each entry in the map.
-     */
-    suspend fun forEach(action: suspend (Map.Entry<K, V>) -> Unit)
-
-    /**
-     * Performs the given [action] on each key-value pair in the map.
-     * This is a convenience method that unpacks entries.
-     */
-    suspend fun forEachPair(action: suspend (key: K, value: V) -> Unit) {
-        forEach { (key, value) -> action(key, value) }
-    }
-
-    /**
-     * Returns a list containing only entries matching the given [predicate].
-     */
-    suspend fun filter(predicate: suspend (Map.Entry<K, V>) -> Boolean): List<Map.Entry<K, V>>
-
-    /**
-     * Returns a map containing only entries matching the given [predicate].
-     */
-    suspend fun filterToMap(predicate: suspend (Map.Entry<K, V>) -> Boolean): Map<K, V> {
-        val result = mutableMapOf<K, V>()
-        forEach { entry ->
-            if (predicate(entry)) {
-                result[entry.key] = entry.value
-            }
-        }
-        return result
-    }
-
-    /**
-     * Returns a list containing only entries whose keys match the given [predicate].
-     */
-    suspend fun filterKeys(predicate: suspend (K) -> Boolean): List<Map.Entry<K, V>> {
-        return filter { predicate(it.key) }
-    }
-
-    /**
-     * Returns a list containing only entries whose values match the given [predicate].
-     */
-    suspend fun filterValues(predicate: suspend (V) -> Boolean): List<Map.Entry<K, V>> {
-        return filter { predicate(it.value) }
-    }
-
-    /**
-     * Returns a list containing the results of applying the given [transform] function
-     * to each entry in the map.
-     */
-    suspend fun <R> map(transform: suspend (Map.Entry<K, V>) -> R): List<R>
-
-    /**
-     * Returns a list containing the results of applying the given [transform] function
-     * to each key-value pair in the map.
-     */
-    suspend fun <R> mapPairs(transform: suspend (key: K, value: V) -> R): List<R> {
-        return map { (key, value) -> transform(key, value) }
-    }
-
-    /**
-     * Returns a list containing only the non-null results of applying the given [transform]
-     * function to each entry in the map.
-     */
-    suspend fun <R : Any> mapNotNull(transform: suspend (Map.Entry<K, V>) -> R?): List<R>
-
-    /**
-     * Returns a list containing all key-value pairs.
+     * Returns a snapshot of all entries, in key order.
      */
     suspend fun toList(): List<Map.Entry<K, V>>
 
@@ -243,13 +182,7 @@ interface SuspendMutableMap<K, V> {
      * Returns a standard Kotlin Map containing all key-value pairs.
      * This creates a snapshot copy at the time of the call.
      */
-    suspend fun toMap(): Map<K, V> {
-        val result = mutableMapOf<K, V>()
-        forEach { (key, value) ->
-            result[key] = value
-        }
-        return result
-    }
+    suspend fun toMap(): Map<K, V> = toList().associate { it.key to it.value }
 
     /**
      * Returns a snapshot of all keys in the map, in key order.
@@ -260,52 +193,4 @@ interface SuspendMutableMap<K, V> {
      * Returns a snapshot of all values in the map, in key order.
      */
     suspend fun values(): List<V>
-
-    // ========== Aggregation Operations ==========
-
-    /**
-     * Returns `true` if all entries match the given [predicate].
-     */
-    suspend fun all(predicate: suspend (Map.Entry<K, V>) -> Boolean): Boolean
-
-    /**
-     * Returns `true` if at least one entry matches the given [predicate].
-     */
-    suspend fun any(predicate: suspend (Map.Entry<K, V>) -> Boolean): Boolean
-
-    /**
-     * Returns `true` if no entries match the given [predicate].
-     */
-    suspend fun none(predicate: suspend (Map.Entry<K, V>) -> Boolean): Boolean
-
-    /**
-     * Returns the number of entries matching the given [predicate].
-     */
-    suspend fun count(predicate: suspend (Map.Entry<K, V>) -> Boolean): Int {
-        var count = 0
-        forEach { entry ->
-            if (predicate(entry)) count++
-        }
-        return count
-    }
-
-    /**
-     * Returns the first entry matching the given [predicate], or `null` if no such entry was found.
-     */
-    suspend fun find(predicate: suspend (Map.Entry<K, V>) -> Boolean): Map.Entry<K, V>?
-
-    /**
-     * Returns the first entry matching the given [predicate], or throws [NoSuchElementException]
-     * if no such entry was found.
-     */
-    suspend fun first(predicate: suspend (Map.Entry<K, V>) -> Boolean): Map.Entry<K, V> {
-        return find(predicate) ?: throw NoSuchElementException("No entry matching predicate found")
-    }
-
-    /**
-     * Returns the first entry matching the given [predicate], or `null` if no such entry was found.
-     */
-    suspend fun firstOrNull(predicate: suspend (Map.Entry<K, V>) -> Boolean): Map.Entry<K, V>? {
-        return find(predicate)
-    }
 }
