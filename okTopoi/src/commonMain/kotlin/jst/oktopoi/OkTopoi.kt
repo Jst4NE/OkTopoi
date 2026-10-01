@@ -8,6 +8,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.io.files.FileSystem
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
@@ -102,7 +105,9 @@ internal fun archiveCorruptedFile(
 
 internal val persistCoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher)
 internal val initDefaultIO = MutableStateFlow<Pair<Path, FileSystem>?>(null)
-internal val initIO = MutableStateFlow<Pair<Path, FileSystem>?>(null)
+// Every root announced ready so far. A set: announcing one root must not un-announce another,
+// or stores of the first created afterwards would wait forever.
+internal val initIO = MutableStateFlow<Set<Pair<Path, FileSystem>>>(emptySet())
 
 fun initDefaultIO(defaultRootDir: Path, fileSystem: FileSystem = SystemFileSystem) {
     Logger.d(tag = "OkTopoi-Init") { "initDefaultIO called with rootDir: $defaultRootDir, fileSystem: $fileSystem" }
@@ -112,10 +117,29 @@ fun initDefaultIO(defaultRootDir: Path, fileSystem: FileSystem = SystemFileSyste
 
 fun initRootDirIO(initRootDir: Path, fileSystem: FileSystem = SystemFileSystem) {
     Logger.d(tag = "OkTopoi-Init") { "initRootDirIO called with rootDir: $initRootDir, fileSystem: $fileSystem" }
-    initIO.value = Pair(initRootDir, fileSystem)
+    initIO.update { it + Pair(initRootDir, fileSystem) }
     Logger.d(tag = "OkTopoi-Init") { "initRootDirIO set successfully" }
 }
 
+
+/**
+ * Waits until the root a persistent store lives in is ready and returns it: the default root set
+ * by [initDefaultIO] when [rootDir] is null, otherwise [rootDir] once [initRootDirIO] announced it.
+ * Logs a warning if that takes a while, so a missing init call shows up instead of a silent hang.
+ */
+internal suspend fun awaitRootDir(rootDir: Path?, fileSystem: FileSystem, owner: String): Path {
+    suspend fun await(): Path =
+        if (rootDir == null) initDefaultIO.first { it?.second == fileSystem }!!.first
+        else initIO.first { Pair(rootDir, fileSystem) in it }.let { rootDir }
+
+    return withTimeoutOrNull(OkTopoiConstants.ROOT_DIR_SLOW_WAIT) { await() } ?: run {
+        Logger.w(tag = "OkTopoi-Init") {
+            "$owner is still waiting for " +
+                if (rootDir == null) "initDefaultIO()" else "initRootDirIO($rootDir)"
+        }
+        await()
+    }
+}
 
 // ================================================================================================
 // FACTORY FUNCTIONS - State Management & Collections

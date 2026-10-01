@@ -31,6 +31,13 @@ object OkTopoiConstants {
      * - `Duration.INFINITE`: outbound sync disabled entirely.
      */
     val DEFAULT_SYNC_INTERVAL: Duration = Duration.ZERO
+
+    /**
+     * How long a persistent store waits for its root directory (initDefaultIO / initRootDirIO)
+     * before logging a warning. The wait itself continues: the warning only makes a missing init
+     * call visible instead of a silent hang.
+     */
+    val ROOT_DIR_SLOW_WAIT: Duration = 5.seconds
     
     /**
      * Maximum number of yield() attempts in ReadWriteLock before suspending.

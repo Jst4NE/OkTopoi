@@ -1,8 +1,6 @@
 package jst.oktopoi
 
 import co.touchlab.kermit.Logger
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
 import kotlinx.io.buffered
 import kotlinx.io.files.FileSystem
 import kotlinx.io.files.Path
@@ -158,15 +156,8 @@ open class Eps<KeyType : Any, ValueType : Any> : Es<KeyType, ValueType> {
 
         runBlockingMultiplatform {
             try {
-                val rootDir: Path
-
                 log.d { "ESP[${this@Eps.callingClassName}.${this@Eps.propertyName}] setup waiting for init" }
-                if (persisted.rootDir == null) {
-                    rootDir = initDefaultIO.filter { it?.second == persisted.fileSystem }.first()!!.first
-                } else {
-                    initIO.filter { it?.first == persisted.rootDir && it.second == persisted.fileSystem }.first()!!
-                    rootDir = persisted.rootDir
-                }
+                val rootDir = awaitRootDir(persisted.rootDir, persisted.fileSystem, "${this@Eps.callingClassName}.${this@Eps.propertyName}")
 
                 this@Eps.fileSystem = persisted.fileSystem
 

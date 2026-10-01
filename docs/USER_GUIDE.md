@@ -31,8 +31,12 @@ initDefaultIO(Path("/app/data"))           // Default for most data
 initRootDirIO(Path("/secure/credentials")) // Specific location for sensitive data
 ```
 
-If initialization is missing, `setup()` blocks indefinitely waiting for it — so initialize before
-the first persistent value is touched. Before persisting anything you can't afford to lose, read
+A store with an explicit `rootDir` waits until that root has been announced with `initRootDirIO`,
+so the call doubles as a gate: stores can be declared before their location is ready (permission
+granted, volume mounted), and they load once it is announced. Announce each root once; announcing
+another does not withdraw it. If initialization is missing, `setup()` blocks its thread waiting for
+it (logging a warning after 5 seconds) — so initialize before the first persistent value is
+touched, and not on a thread a store may be waiting on. Before persisting anything you can't afford to lose, read
 [Things to know](#things-to-know).
 
 ## Individual State

@@ -4,8 +4,6 @@ package jst.oktopoi
 
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.io.buffered
 import kotlinx.io.files.FileSystem
@@ -129,12 +127,7 @@ open class Ep<ValueType : Any?> : E<ValueType> {
 
                 log.d { "EP[${this@Ep.callingClassName}.${this@Ep.propertyName}] setup waiting for init" }
 
-                val rootDir: Path = if (persisted.rootDir == null) {
-                    initDefaultIO.filter { it?.second == persisted.fileSystem }.first()!!.first
-                } else {
-                    initIO.filter { it?.first == persisted.rootDir && it.second == persisted.fileSystem }.first()!!
-                    persisted.rootDir
-                }
+                val rootDir = awaitRootDir(persisted.rootDir, persisted.fileSystem, "${this@Ep.callingClassName}.${this@Ep.propertyName}")
 
                 this@Ep.fileSystem = persisted.fileSystem
                 val dirPath = Path(rootDir, callingClassName)
