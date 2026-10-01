@@ -608,6 +608,11 @@ server-computed fields), apply it with `fromSyncIfUnchanged(key, sent, value, ti
 inside `outgoingSync` rather than `fromSync`: it applies only while the entry still holds `sent`,
 so clock skew can neither discard the response nor let it overwrite a newer edit.
 
+To send only what an edit changed, call `syncBase(key)` from inside `outgoingSync`: it returns the
+server-confirmed value the pending edit was made on top of (null for an entry created locally).
+Diffing the value against it gives the fields the user changed; a whole-entry write would also
+send the local copy of every other field and overwrite whatever the server changed there since.
+
 A write that fails with an error your `isSyncErrorRetryable` classifies as non-retryable is a
 separate case (by default every error is retried): the entry is rolled back
 to its last confirmed value (or removed, if it was never confirmed), the failed write is archived

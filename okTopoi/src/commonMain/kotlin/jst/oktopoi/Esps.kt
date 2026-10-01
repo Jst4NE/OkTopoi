@@ -459,6 +459,18 @@ override fun fromPersistString(string: String, fileName: String) {
     }
 
 
+    /**
+     * The server-confirmed value a pending edit of [key] was made on top of: the value before the
+     * first unsynced local change, or the value the last write left on the server if newer local
+     * state superseded it in flight. Null when nothing is pending or the entry was created locally.
+     *
+     * Lets [outgoingSync] send only what the local edit changed. A whole-row write would also send
+     * the local copy of every other field, overwriting whatever the server changed in them since.
+     * Writes of one key are serialized, so the base read from inside [outgoingSync] belongs to
+     * the write being made.
+     */
+    suspend fun syncBase(key: KeyType): ValueType? = withReadLock { unsyncedKeysMap[key]?.lastSyncedValue }
+
     suspend fun entriesToSync(): List<Triple<KeyType, ValueType?, Long>> {
         return withWriteLock {
             val keysToRemove = mutableListOf<KeyType>()
