@@ -588,9 +588,8 @@ released.
 
 ### Writes are ordered, not atomic
 
-In a collection, persistence comes first: a `put` or `remove` whose file operation fails throws
-and leaves the collection unchanged. A single value (`ep`, `esp`) is set in memory first and
-rolled back if writing its file fails, so a collector can briefly see the value that failed. Files
+Persistence comes first: a write whose file operation fails throws and leaves the value or
+collection unchanged, so no collector ever sees it. Files
 are overwritten in place (only [startup compaction](#startup-compaction-large-collections-on-slow-io)
 writes through a temp file and a rename), so a crash or process kill *during* a write can leave
 that file truncated. On the next start it fails to decode and is handled as in

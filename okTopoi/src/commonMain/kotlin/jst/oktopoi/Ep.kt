@@ -3,6 +3,8 @@
 package jst.oktopoi
 
 import co.touchlab.kermit.Logger
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.io.buffered
@@ -44,6 +46,8 @@ import kotlinx.coroutines.SupervisorJob
  * ## Persistence Behavior
  *
  * - **Write-through**: State changes block the caller until file writes complete using runBlockingMultiplatform
+ * - **Persistence first**: the file is written before the value changes; if the write fails,
+ *   [PersistenceFailedException] is thrown and the value is unchanged
  * - **Read-on-startup**: Persisted values loaded during setup() initialization
  * - **In-place writes**: the file is overwritten in place, so a crash mid-write can leave it
  *   truncated; it is archived on the next load and the default is used.
@@ -71,7 +75,7 @@ import kotlinx.coroutines.SupervisorJob
  *
  * ## File Management
  *
- * - **File location**: `{rootDir}/{className}.{propertyName}.json`
+ * - **File location**: `{rootDir}/{simple class name}/{propertyName}`
  * - **Format**: JSON using kotlinx-serialization
  * - **Encoding**: UTF-8 text encoding
  * - **Error handling**: File I/O errors throw PersistenceFailedException
@@ -82,13 +86,14 @@ import kotlinx.coroutines.SupervisorJob
  * considerations for file I/O:
  * - State reads are immediate and thread-safe
  * - File writes are performed synchronously and block the calling thread
- * - Multiple concurrent state changes are serialized to prevent file corruption
+ * - Concurrent state changes are serialized, so the file and the value change in the same order
  *
  * ## Error Handling
  *
  * - **Setup failures**: Throws PersistenceFailedException during initialization (fail-fast)
- * - **Write failures**: State changes rolled back + PersistenceFailedException thrown (fail-fast) 
- * - **Read failures**: Missing/empty files use defaults; corrupted files fail fast with PersistenceFailedException
+ * - **Write failures**: PersistenceFailedException thrown; the value is unchanged
+ * - **Read failures**: Missing/empty files use the default; an undecodable file is archived and
+ *   the default is used
  *
  * @param ValueType the type of value to persist (must be serializable)
  *
@@ -163,85 +168,42 @@ open class Ep<ValueType : Any?> : E<ValueType> {
         }
     }
 
-    // Override all state-changing methods to add persistence
-    
+    // Every change writes the file first and updates the value only once that succeeded, so a
+    // failed write throws and no collector ever sees the value. The lock keeps file and value in
+    // the same order when several threads write; it is reentrant (Esp's encodeValue nests inside).
+    // set() and clear() are E's, which assign through the value setter below.
+    private val writeLock = SynchronizedObject()
+
     override var value: ValueType
         get() = super.value
         set(newValue) {
-            val oldValue = super.value
-            super.value = newValue
-            try {
-                persistValue(newValue)
-            } catch (e: Exception) {
-                super.value = oldValue  // Rollback
-                throw PersistenceFailedException("Failed to persist value: ${e.message}", e)
+            synchronized(writeLock) {
+                persistOrThrow(newValue)
+                super.value = newValue
             }
         }
 
     override suspend fun emit(value: ValueType) {
-        val oldValue = super.value
-        try {
-            super.emit(value)
-            persistValue(value)
-        } catch (e: Exception) {
-            // Rollback by calling super.emit (bypassing our persistence)
-            super.emit(oldValue)
-            throw PersistenceFailedException("Failed to persist emitted value: ${e.message}", e)
-        }
+        this.value = value
     }
 
     override fun tryEmit(value: ValueType): Boolean {
-        val oldValue = super.value
-        val result = super.tryEmit(value)
-        if (result) {
-            try {
-                persistValue(value)
-            } catch (e: Exception) {
-                // Rollback by calling super.tryEmit (bypassing our persistence)
-                super.tryEmit(oldValue)
-                throw PersistenceFailedException("Failed to persist tryEmit value: ${e.message}", e)
-            }
-        }
-        return result
+        this.value = value
+        return true
     }
 
-    override fun compareAndSet(expect: ValueType, update: ValueType): Boolean {
-        val result = super.compareAndSet(expect, update)
-        if (result) {
-            try {
-                persistValue(update)
-            } catch (e: Exception) {
-                super.value = expect  // Rollback to expected value
-                throw PersistenceFailedException("Failed to persist compareAndSet: ${e.message}", e)
-            }
+    override fun compareAndSet(expect: ValueType, update: ValueType): Boolean =
+        synchronized(writeLock) {
+            if (super.value != expect) return@synchronized false
+            persistOrThrow(update)
+            super.compareAndSet(expect, update)
         }
-        return result
-    }
 
-    // Override convenience methods that change state
-    
-    override fun set(newValue: ValueType) {
-        val oldValue = super.value
-        super.set(newValue)
+    private fun persistOrThrow(value: ValueType) {
         try {
-            persistValue(newValue)
+            persistValue(value)
         } catch (e: Exception) {
-            super.value = oldValue  // Rollback
-            throw PersistenceFailedException("Failed to persist set: ${e.message}", e)
-        }
-    }
-
-    // setIfDifferent() calls compareAndSet() internally, which already handles persistence
-    // No override needed - inherited behavior is correct
-
-    override fun clear() {
-        val oldValue = super.value
-        super.clear()
-        try {
-            persistValue(defaultValue?.invoke())
-        } catch (e: Exception) {
-            super.value = oldValue  // Rollback
-            throw PersistenceFailedException("Failed to persist clear: ${e.message}", e)
+            throw PersistenceFailedException("Failed to persist value: ${e.message}", e)
         }
     }
 
