@@ -793,7 +793,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, ValueType>> =
         asSnapshotStateListBySecondaryKey(
-            criteria = *criteria.byIndexName(),
+            criteria = criteria.byIndexName(),
             entryComparator = entryComparator,
             filter = filter,
             lifecycleOwner = lifecycleOwner,
@@ -813,7 +813,7 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
         minActiveState: Lifecycle.State = Lifecycle.State.STARTED,
     ): SnapshotStateList<Map.Entry<KeyType, ValueType>> =
         asSnapshotStateListBySecondaryKey(
-            criteria = *criteria.byIndexName(),
+            criteria = criteria.byIndexName(),
             filter = filter,
             lifecycleOwner = lifecycleOwner,
             minActiveState = minActiveState,
@@ -2254,7 +2254,7 @@ private suspend fun <K : Any, V : Any> replaceKeyInSortedList(
     val passes = entry != null && filter?.invoke(entry) != false
     val index = list.indexOfFirst { it.key == key }
     if (index >= 0) list.removeAt(index)
-    if (passes) list.add(findMappedInsertionPoint(list, entry!!, comparator), entry)
+    if (passes) list.add(findMappedInsertionPoint(list, entry, comparator), entry)
 }
 
 /**
