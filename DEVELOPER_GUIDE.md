@@ -1,7 +1,5 @@
 # OkTopoi Developer Guide
 
-**Version:** 1.0.0
-**Last Updated:** 2025-11-13
 **Target Audience:** Developers joining the OkTopoi project
 
 ## Table of Contents
