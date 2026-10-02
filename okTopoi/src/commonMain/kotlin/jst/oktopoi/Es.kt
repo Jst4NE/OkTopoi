@@ -289,36 +289,15 @@ open class Es<KeyType : Any, ValueType : Any> : TreeMap<KeyType, ValueType> {
      *   to reconcile any missed changes while the lifecycle was inactive.
      * - Mutations to the returned list occur on the main thread.
      *
-     * ## Important: Parameter Stability
+     * ## Parameter Stability
      *
-     * **The `entryComparator` and `filter` parameters must be stable across recompositions.**
-     * Unstable parameters will cause the LaunchedEffect to restart unnecessarily.
+     * `entryComparator`, `filter` and `initialEntriesProvider` are memoized by the OkTopoi compiler
+     * plugin (`@WrapInRemember`), keyed on the values they capture, so write them inline. The list
+     * rebuilds when one of those values changes — e.g. a search query the filter reads. See the
+     * guide's "Parameter stability in Compose" for what counts as a capture.
      *
-     * ### Manual Wrapping Required
-     * 
-     * You must manually wrap unstable expressions with `remember { }`:
-     * 
-     * ```kotlin
-     * // ✅ Correct - Direct inline lambda wrapped with remember
-     * val list = users.asSnapshotStateList(
-     *     filter = remember { { it.value.isActive } }
-     * )
-     *
-     * // ✅ Correct - Comparator factory wrapped with remember
-     * val list = users.asSnapshotStateList(
-     *     entryComparator = remember { compareBy { it.value.name } }
-     * )
-     *
-     * // ❌ Incorrect - Unstable lambda causes constant recomposition
-     * val list = users.asSnapshotStateList(
-     *     filter = { it.value.isActive }  // This will recompose constantly!
-     * )
-     * ```
-     *
-     * @param entryComparator custom comparator for entry ordering (null = use key ordering).
-     *                        **Must be stable across recompositions.**
-     * @param filter optional predicate to include/exclude entries from the list.
-     *               **Must be stable across recompositions.**
+     * @param entryComparator custom comparator for entry ordering (null = use key ordering)
+     * @param filter optional predicate to include/exclude entries from the list
      * @param initialEntriesProvider custom provider for initial entries (advanced usage)
      * @param lifecycleOwner owner that controls collection lifecycle (defaults to LocalLifecycleOwner)
      * @param minActiveState minimum lifecycle state required for collection (defaults to STARTED)

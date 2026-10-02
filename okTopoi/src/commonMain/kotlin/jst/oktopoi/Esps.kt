@@ -405,8 +405,8 @@ override fun fromPersistString(string: String, fileName: String) {
 
     /**
      * Field-level merge of an incoming version into a pending local edit, so neither side's
-     * changes to different fields are lost: without it, a newer incoming version replaced the
-     * whole entry (discarding the edit) and an older one was dropped whole.
+     * changes to different fields are lost. The default (null) keeps the timestamp rule: a newer
+     * incoming version replaces the whole entry, discarding the edit, and an older one is dropped.
      *
      * Return the incoming [remote] with the fields [local] changed relative to [base] carried
      * over. For a field both changed, [remoteWins] (the incoming version is newer than the edit)
