@@ -157,7 +157,7 @@ class ComposeCallSiteRememberWrapper(
         }
 
     private fun resolveComposerSymbols(): ComposerSymbols {
-        val composerClass = pluginContext.referenceClass(composerClassId)
+        val composerClass = pluginContext.finderForBuiltins().findClass(composerClassId)
             ?: failHard("Could not resolve class androidx.compose.runtime.Composer. " +
                 "Is the Compose Runtime dependency on the classpath?")
 
@@ -178,7 +178,7 @@ class ComposeCallSiteRememberWrapper(
 
         // androidx.compose.runtime.cache<T>(Composer.(Boolean, () -> T) -> T)
         val cacheId = CallableId(FqName("androidx.compose.runtime"), Name.identifier("cache"))
-        val cacheFn = pluginContext.referenceFunctions(cacheId).firstOrNull { sym ->
+        val cacheFn = pluginContext.finderForBuiltins().findFunctions(cacheId).firstOrNull { sym ->
             val fn = sym.owner
             val regulars = fn.parameters.count { it.kind == IrParameterKind.Regular }
             val hasExtReceiver = fn.parameters.any { it.kind == IrParameterKind.ExtensionReceiver }
@@ -614,7 +614,7 @@ class ComposeCallSiteRememberWrapper(
                     replacements[expression]?.let { return irGet(it) }
                     return expression // don't rewrite inside lambda bodies
                 }
-            }, null) as IrExpression
+            }, null)
 
             // Safety net: every composer-touching subtree must have been hoisted, otherwise
             // deferring the rest would still corrupt the slot table.
@@ -713,7 +713,7 @@ class ComposeCallSiteRememberWrapper(
     // `remember(calculation)` — zero-key fallback, matches the original plugin behaviour.
     private val rememberNoKeysSymbol: IrSimpleFunctionSymbol by lazy {
         val callableId = CallableId(FqName("androidx.compose.runtime"), Name.identifier("remember"))
-        pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+        pluginContext.finderForBuiltins().findFunctions(callableId).firstOrNull { sym ->
             val regulars = sym.owner.parameters.filter { it.kind == IrParameterKind.Regular }
             regulars.size == 1 && regulars[0].varargElementType == null
         } ?: failHard("androidx.compose.runtime.remember(calculation) overload not found. " +
@@ -723,7 +723,7 @@ class ComposeCallSiteRememberWrapper(
     // `remember(vararg keys: Any?, calculation: () -> T)` — keyed variant for N captures.
     private val rememberVarargSymbol: IrSimpleFunctionSymbol by lazy {
         val callableId = CallableId(FqName("androidx.compose.runtime"), Name.identifier("remember"))
-        pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+        pluginContext.finderForBuiltins().findFunctions(callableId).firstOrNull { sym ->
             val regulars = sym.owner.parameters.filter { it.kind == IrParameterKind.Regular }
             regulars.size == 2 &&
                 regulars[0].varargElementType != null &&
@@ -749,7 +749,7 @@ class ComposeCallSiteRememberWrapper(
             FqName("jst.oktopoi"),
             Name.identifier("_oktopoiArrayChangedOr"),
         )
-        pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+        pluginContext.finderForBuiltins().findFunctions(callableId).firstOrNull { sym ->
             val regulars = sym.owner.parameters.filter { it.kind == IrParameterKind.Regular }
             regulars.size == 3
         } ?: failHard("jst.oktopoi._oktopoiArrayChangedOr(composer, keys, seed) not found. " +

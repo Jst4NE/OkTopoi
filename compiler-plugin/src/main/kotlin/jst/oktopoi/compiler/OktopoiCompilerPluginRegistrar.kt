@@ -7,8 +7,9 @@ import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.cli.common.messages.MessageCollector
 import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
 import org.jetbrains.kotlin.config.CommonConfigurationKeys
+import org.jetbrains.kotlin.config.MessageCollectorAccess
 
-@OptIn(ExperimentalCompilerApi::class)
+@OptIn(ExperimentalCompilerApi::class, MessageCollectorAccess::class)
 class OktopoiCompilerPluginRegistrar : CompilerPluginRegistrar() {
     override val pluginId: String = "jst.oktopoi.compiler-plugin"
     override val supportsK2: Boolean = true
