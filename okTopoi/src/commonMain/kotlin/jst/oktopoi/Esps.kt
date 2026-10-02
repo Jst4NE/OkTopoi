@@ -775,15 +775,15 @@ override fun fromPersistString(string: String, fileName: String) {
      * of that happens: the newer state is left pending for its own attempt, and only the archive
      * record is written. [onSyncErrorArchived] does not fire — nothing was rolled back.
      */
-    private fun archiveSyncError(key: KeyType, value: ValueType?, error: Exception) {
-        val outcome = withWriteLockBlocking {
+    private suspend fun archiveSyncError(key: KeyType, value: ValueType?, error: Exception) {
+        val outcome = withWriteLock {
             // 0. The rejection is of `value`. If the entry no longer holds it — edited again while
             //    the write was in flight, or already overwritten by a remote version — rolling back
             //    would destroy state that was never tried (or remove a row the server still holds).
             //    Leave it alone: newer local state is still pending and gets its own attempt, which
             //    surfaces its own failure if it is rejected too. Checked under the same lock as the
             //    rollback, so no edit can slip in between.
-            if (getUnsafe(key) != value) return@withWriteLockBlocking null
+            if (getUnsafe(key) != value) return@withWriteLock null
             // 1. Capture sync state before mutation
             val entry = unsyncedKeysMap[key]
             val ts = entry?.timestamp ?: 0L
@@ -884,10 +884,12 @@ override fun fromPersistString(string: String, fileName: String) {
         }
     }
 
-    // Primary sync methods removed - use regular operations which auto-mark as unsynced
-
-    fun syncEntry(key: KeyType) {
-        withWriteLockBlocking {
+    /**
+     * Queues [key] for another outbound write without changing its value — e.g. to resend an entry
+     * after fixing what made the server reject it. Changing a value queues it on its own.
+     */
+    suspend fun syncEntry(key: KeyType) {
+        withWriteLock {
             val ts = Clock.System.now().toEpochMilliseconds()
             // Preserve any existing lastSyncedValue (manual re-queue isn't a value change)
             val existing = unsyncedKeysMap[key]

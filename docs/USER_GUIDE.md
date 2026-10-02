@@ -577,6 +577,15 @@ declared, and there is currently no way to override them. So:
 Assigning `.value` on `ep` or `esp` writes the file before it returns. Avoid doing it in a hot
 path on the main thread. Collection operations are suspend functions and don't block.
 
+### Callbacks under the lock must not call back into the store
+
+A collection's lock is not reentrant. Code that runs while the collection holds it — secondary-key
+extractors, comparators, a `forEachBy` action, a `mergePending` override — must not call that same
+collection (not even `get`), or it waits forever. These callbacks are non-suspend, which rules out
+the suspend API; just don't reach for `runBlocking` to get around it. Lambdas passed to
+`forEach`, `filter`, `map` and the like are fine: they run over a snapshot, after the lock is
+released.
+
 ### Writes are ordered, not atomic
 
 Persistence comes first: a write that fails with an exception never reaches memory. But files

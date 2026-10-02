@@ -123,6 +123,10 @@ open class TreeMap<K, V> internal constructor(
     protected suspend fun <T> withWriteLock(block: suspend () -> T): T =
         rwLock.withWriteLock { block() }
     
+    // Blocking forms, for subclass code that must take the lock where it cannot suspend (a
+    // constructor, a platform or interop callback). They block the calling thread until the lock is
+    // free: never call them from a coroutine (use the suspend forms), on a UI thread, or while this
+    // store's lock is already held — the lock is not reentrant, so that waits forever.
     protected fun <T> withReadLockBlocking(block: () -> T): T =
         runBlockingMultiplatform { rwLock.withReadLock { block() } }
     

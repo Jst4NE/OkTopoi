@@ -31,6 +31,11 @@ import kotlin.coroutines.resume
  * - **Optimized writes**: Writers yield briefly before suspending, optimizing for short read operations
  * - **Suspension-based**: No thread blocking - uses coroutine suspension for waiting
  * - **Cancellation-safe**: Properly handles coroutine cancellation during lock acquisition
+ * - **Not reentrant**: a coroutine holding the lock that asks for it again (read or write) waits
+ *   forever — a nested write at once, a nested read as soon as a writer is queued between the two.
+ *   Code that runs while a store holds its lock (index extractors, comparators, a `forEachBy`
+ *   action, `mergePending`) must therefore not call back into that store. Making it reentrant
+ *   would cost a coroutine-context change on every acquisition, i.e. on every `get()`.
  *
  * ## Usage Pattern
  *
